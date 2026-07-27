@@ -196,7 +196,7 @@ function macrosForGrams(food, grams) {
   };
 }
 
-function buildDaySchedule(weekStartSunday, phaseDef, longRun, isCutback) {
+function buildDaySchedule(weekStartSunday, phaseDef, longRun, isCutback, reducedFreq) {
   const days = [];
   for (let i = 0; i < 7; i++) {
     const d = new Date(weekStartSunday);
@@ -212,7 +212,24 @@ function buildDaySchedule(weekStartSunday, phaseDef, longRun, isCutback) {
   const totalWeekly = longRun * phaseDef.totalFactor * cutMult;
   const nonLong = Math.max(totalWeekly - longRun, 0);
 
-  Object.entries(phaseDef.weights).forEach(([short, weight]) => {
+  // 5-day mode: only meaningful in Foundation/Build I, where Thursday is just
+  // filler easy mileage. In Build II/Peak, Thursday is the deliberate
+  // back-to-back long effort — too structurally important to drop, so it's
+  // left untouched there even if the toggle is on.
+  const canReduce = reducedFreq && (phaseDef.name === "Foundation" || phaseDef.name === "Build I");
+  let weights = phaseDef.weights;
+  if (canReduce) {
+    weights = { ...phaseDef.weights };
+    const thuWeight = weights.Thu || 0;
+    delete weights.Thu;
+    const remainingKeys = Object.keys(weights);
+    const remainingSum = remainingKeys.reduce((s, k) => s + weights[k], 0) || 1;
+    remainingKeys.forEach((k) => {
+      weights[k] = weights[k] + thuWeight * (weights[k] / remainingSum);
+    });
+  }
+
+  Object.entries(weights).forEach(([short, weight]) => {
     const idx = SHORT_IDX[short];
     let miles = Math.round(nonLong * weight);
     if (miles < 2) miles = 2;
@@ -220,6 +237,7 @@ function buildDaySchedule(weekStartSunday, phaseDef, longRun, isCutback) {
     days[idx].type = phaseDef.labels[short] || "Zone 2 easy";
     days[idx].strength = phaseDef.strengthDays.includes(short);
   });
+  // Thursday, when dropped, keeps its default { type: "Rest", miles: 0 } from above.
 
   return days;
 }
@@ -269,7 +287,7 @@ function mondayOf(date) {
   return d;
 }
 
-function buildPlan(raceDateStr, planStartDateStr) {
+function buildPlan(raceDateStr, planStartDateStr, reducedFreq) {
   const race = new Date(raceDateStr + "T00:00:00");
   const planStart = mondayOf(new Date((planStartDateStr || fmtDate(new Date())) + "T00:00:00"));
   const raceMonday = mondayOf(race);
@@ -297,15 +315,17 @@ function buildPlan(raceDateStr, planStartDateStr) {
 
   phaseBlocks.forEach((block) => {
     const { def, len } = block;
+    const slowGrowth = reducedFreq && (def.name === "Foundation" || def.name === "Build I");
     for (let i = 0; i < len; i++) {
       const weekStart = new Date(planStart);
       weekStart.setDate(weekStart.getDate() + weekCursor * 7);
       const p = len > 1 ? i / (len - 1) : 1;
-      const longRunRaw = def.longRun[0] + (def.longRun[1] - def.longRun[0]) * p;
+      const pGrowth = slowGrowth ? Math.pow(p, 1.6) : p; // bows the curve so early weeks add less, later weeks catch up
+      const longRunRaw = def.longRun[0] + (def.longRun[1] - def.longRun[0]) * pGrowth;
       const isCutback = i > 0 && (i + 1) % 4 === 0;
       const longRun = Math.round(isCutback ? longRunRaw * 0.75 : longRunRaw);
       if (def.name === "Peak") peakLongRunSeen = Math.max(peakLongRunSeen, longRun);
-      const days = buildDaySchedule(weekStart, def, longRun, isCutback);
+      const days = buildDaySchedule(weekStart, def, longRun, isCutback, reducedFreq);
       const totalMiles = days.reduce((s, d) => s + (d.miles || 0), 0);
       weeks.push({
         week: weekCursor + 1,
@@ -569,7 +589,7 @@ export default function UltraTrainingApp() {
   const [tab, setTab] = useState("dashboard");
   const [raceDate, setRaceDate] = useState("2027-01-30");
   const [planStartDate, setPlanStartDate] = useState("2026-07-27");
-  const [profile, setProfile] = useState({ baseTDEE: 2400, weightLb: "", weightLossMode: false, deficitKcal: 400 });
+  const [profile, setProfile] = useState({ baseTDEE: 2400, weightLb: "", weightLossMode: false, deficitKcal: 400, reducedFrequency: false });
   const [runs, setRuns] = useState([]);
   const [strengthLogs, setStrengthLogs] = useState([]);
   const [meals, setMeals] = useState({}); // { 'YYYY-MM-DD': [ {id,name,cal,protein,carbs,fat} ] }
@@ -580,7 +600,7 @@ export default function UltraTrainingApp() {
     (async () => {
       const rd = await loadJSON("race-date", "2027-01-30");
       const psd = await loadJSON("plan-start-date", "2026-07-27");
-      const pr = await loadJSON("profile", { baseTDEE: 2400, weightLb: "", weightLossMode: false, deficitKcal: 400 });
+      const pr = await loadJSON("profile", { baseTDEE: 2400, weightLb: "", weightLossMode: false, deficitKcal: 400, reducedFrequency: false });
       const rn = await loadJSON("runs", []);
       const sl = await loadJSON("strength-logs", []);
       const ml = await loadJSON("meals", {});
@@ -623,7 +643,7 @@ export default function UltraTrainingApp() {
     if (ready) saveJSON("saved-meal-sets", savedMealSets);
   }, [savedMealSets, ready]);
 
-  const plan = useMemo(() => buildPlan(raceDate, planStartDate), [raceDate, planStartDate]);
+  const plan = useMemo(() => buildPlan(raceDate, planStartDate, profile.reducedFrequency), [raceDate, planStartDate, profile.reducedFrequency]);
   const daysToRace = daysBetween(new Date(), new Date(raceDate + "T00:00:00"));
   const weeksToRace = Math.max(0, Math.ceil(daysToRace / 7));
 
@@ -737,6 +757,7 @@ export default function UltraTrainingApp() {
             todaysCalories={todaysCalories}
             targetKcal={targetKcal}
             todaysRun={todaysRun}
+            reducedFrequency={profile.reducedFrequency}
           />
         )}
         {tab === "log" && (
@@ -836,7 +857,7 @@ function Strength({ currentPhase }) {
   );
 }
 
-function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalories, targetKcal, todaysRun }) {
+function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalories, targetKcal, todaysRun, reducedFrequency }) {
   const today = todayStr();
   const todaysPrescription = currentWeek.days.find((d) => d.date === today);
 
@@ -897,7 +918,7 @@ function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalor
           })}
         </div>
         <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 12 }}>
-          Mobility work daily, 10 min post-run · Sunday fully off{currentWeek.isCutback ? " · Cutback week — trust the lighter load" : ""}
+          Mobility work daily, 10 min post-run · Sunday fully off{currentWeek.isCutback ? " · Cutback week — trust the lighter load" : ""}{reducedFrequency && (currentWeek.phase === "Foundation" || currentWeek.phase === "Build I") ? " · 5-day mode active (Thu is rest)" : ""}
         </div>
       </Card>
 
@@ -1797,6 +1818,20 @@ function Settings({ raceDate, setRaceDate, planStartDate, setPlanStartDate, prof
         </div>
         <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 10 }}>
           Week 1 always snaps to the Monday on or before whatever date you enter here.
+        </div>
+      </Card>
+      <Card>
+        <Eyebrow>Training frequency</Eyebrow>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: COLORS.ink, cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            checked={!!profile.reducedFrequency}
+            onChange={(e) => setProfile({ ...profile, reducedFrequency: e.target.checked })}
+          />
+          5-day week (knee-friendly mode)
+        </label>
+        <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 10, lineHeight: 1.6 }}>
+          Drops Thursday to a full rest day in Foundation and Build I (that day's mileage gets redistributed across Mon/Tue/Fri/Sat, not just deleted), and slows how fast the long run grows week to week during those two phases. Doesn't touch Build II or Peak, since Thursday there is the deliberate back-to-back long effort — too load-bearing to drop. Flip this on or off any week; the plan rebuilds immediately either way.
         </div>
       </Card>
       <Card>

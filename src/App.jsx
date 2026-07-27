@@ -640,7 +640,7 @@ export default function UltraTrainingApp() {
   const todaysPrescription = currentWeek.days.find((d) => d.date === todayStr());
   const isHardDay = !!todaysPrescription && /Long Run|Back-to-Back/.test(todaysPrescription.type);
   const rawDeficit = profile.weightLossMode && !isHardDay ? Number(profile.deficitKcal || 0) : 0;
-  const preDeficitTarget = Number(profile.baseTDEE || 0) + activityKcal;
+  const preDeficitTarget = Number(profile.baseTDEE || 0);
   const safetyFloor = Math.max(1200, Number(profile.baseTDEE || 0) * 0.75);
   const targetKcal = Math.round(Math.max(preDeficitTarget - rawDeficit, safetyFloor));
   const appliedDeficit = preDeficitTarget - targetKcal;
@@ -1318,8 +1318,6 @@ function FoodSearch({ onAdd }) {
   const [selected, setSelected] = useState(null);
   const [unit, setUnit] = useState("oz");
   const [amount, setAmount] = useState("");
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiError, setAiError] = useState(null);
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -1353,7 +1351,6 @@ function FoodSearch({ onAdd }) {
 
   const pick = (food) => {
     setSelected(food);
-    setAiError(null);
     setUnit("g");
     setAmount("100");
   };
@@ -1363,7 +1360,7 @@ function FoodSearch({ onAdd }) {
 
   const add = () => {
     if (!selected || !amount) return;
-    const label = `${amount} ${unit}${Number(amount) !== 1 ? (unit === "serving" ? "s" : "") : ""} ${selected.name}${selected.isEstimated ? " (estimated)" : ""}`;
+    const label = `${amount} ${unit}${Number(amount) !== 1 ? (unit === "serving" ? "s" : "") : ""} ${selected.name}`;
     onAdd({
       name: label,
       cal: macros.cal,
@@ -1376,54 +1373,15 @@ function FoodSearch({ onAdd }) {
     setQuery("");
   };
 
-  const askClaude = async () => {
-    if (!query.trim()) return;
-    setAiLoading(true);
-    setAiError(null);
-    try {
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 1000,
-          messages: [
-            {
-              role: "user",
-              content: `Identify this food: "${query.trim()}". Ignore any quantity or serving size mentioned in that text — respond with nutrition normalized to a fixed 100g of the food itself, so the amount can be adjusted afterward. Respond with ONLY a JSON object, no markdown fences, no preamble or explanation, in exactly this shape: {"name": "short generic food name, no quantity", "cal100": number, "protein100": number, "carbs100": number, "fat100": number}. All four numeric fields are per 100g: cal100 is kcal, the rest are grams.`,
-            },
-          ],
-        }),
-      });
-      const data = await response.json();
-      const text = (data.content || []).map((b) => b.text || "").join("").replace(/```json|```/g, "").trim();
-      const parsed = JSON.parse(text);
-      pick({
-        name: parsed.name,
-        cal: Number(parsed.cal100) || 0,
-        protein: Number(parsed.protein100) || 0,
-        carbs: Number(parsed.carbs100) || 0,
-        fat: Number(parsed.fat100) || 0,
-        defaultUnit: "oz",
-        isEstimated: true,
-      });
-    } catch (e) {
-      setAiError("Couldn't get an estimate — try rephrasing (e.g. \"grilled salmon\") or try again.");
-    } finally {
-      setAiLoading(false);
-    }
-  };
-
   return (
     <Card>
       <Eyebrow>Search foods</Eyebrow>
       <Input
-        placeholder="e.g. chicken breast, white rice, grass fed butter…"
+        placeholder="e.g. chicken breast, white rice, butter…"
         value={query}
         onChange={(e) => {
           setQuery(e.target.value);
           setSelected(null);
-          setAiError(null);
         }}
       />
       {results.length > 0 && (
@@ -1442,10 +1400,7 @@ function FoodSearch({ onAdd }) {
 
       {selected && (
         <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${COLORS.line}` }}>
-          <div style={{ color: COLORS.paper, fontSize: 15, fontWeight: 600, marginBottom: 10 }}>
-            {selected.name}
-            {selected.isEstimated && <span style={{ color: COLORS.amber, fontSize: 12, fontWeight: 400 }}> · AI estimate</span>}
-          </div>
+          <div style={{ color: COLORS.paper, fontSize: 15, fontWeight: 600, marginBottom: 10 }}>{selected.name}</div>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <Input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} style={{ maxWidth: 90 }} />
             <select
@@ -1469,21 +1424,17 @@ function FoodSearch({ onAdd }) {
 
       {!selected && query.trim() && bestMatchScore < 60 && (
         <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${COLORS.line}` }}>
-          <div style={{ color: COLORS.inkSoft, fontSize: 12.5, marginBottom: 10 }}>
+          <div style={{ color: COLORS.inkSoft, fontSize: 12.5 }}>
             {results.length === 0
-              ? "Not in the local database. Claude can estimate it — this is an AI estimate, not a verified nutrition lookup. Portion size is adjustable afterward just like any other food."
-              : "Nothing above is an exact match. Claude can estimate this specific food instead — an AI estimate, not a verified nutrition lookup."}
+              ? `Not in the local database. Use "+ Add a custom food" below to log it manually.`
+              : `Nothing above is an exact match — if none of these are right, use "+ Add a custom food" below.`}
           </div>
-          <Button onClick={askClaude} variant="ghost">
-            {aiLoading ? "Estimating…" : `Estimate "${query.trim()}"`}
-          </Button>
-          {aiError && <div style={{ color: COLORS.rust, fontSize: 12.5, marginTop: 8 }}>{aiError}</div>}
         </div>
       )}
 
       {!selected && !query.trim() && (
         <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 10 }}>
-          {FOOD_DB.length} foods in the local database, checked first. Anything not found falls back to a Claude estimate.
+          {FOOD_DB.length} foods in the local database. Anything not found can be added manually with the custom entry below.
         </div>
       )}
     </Card>
@@ -1861,7 +1812,7 @@ function Settings({ raceDate, setRaceDate, planStartDate, setPlanStartDate, prof
           </div>
         </div>
         <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 10 }}>
-          Activity calories are estimated from logged run duration and added to your base TDEE on training days. Don't know your TDEE precisely — a rough estimate is fine to start; it improves as your weight trend comes in.
+          Activity calories are estimated from logged run duration and shown for reference, but are not added to today's target — your target stays at your base TDEE (minus any deficit below) regardless of how much you ran. Don't know your TDEE precisely — a rough estimate is fine to start; it improves as your weight trend comes in.
         </div>
       </Card>
       <Card>

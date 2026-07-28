@@ -718,7 +718,7 @@ export default function UltraTrainingApp() {
   const [tab, setTab] = useState("dashboard");
   const [raceDate, setRaceDate] = useState("2027-01-30");
   const [planStartDate, setPlanStartDate] = useState("2026-07-27");
-  const [profile, setProfile] = useState({ baseTDEE: 2400, weightLb: "", weightLossMode: false, deficitKcal: 400, reducedFrequency: false, usdaApiKey: "" });
+  const [profile, setProfile] = useState({ baseTDEE: 2400, weightLb: "", weightLossMode: false, deficitKcal: 400, reducedFrequency: false, usdaApiKey: "", withingsClientId: "" });
   const [runs, setRuns] = useState([]);
   const [strengthLogs, setStrengthLogs] = useState([]);
   const [meals, setMeals] = useState({}); // { 'YYYY-MM-DD': [ {id,name,cal,protein,carbs,fat} ] }
@@ -726,17 +726,23 @@ export default function UltraTrainingApp() {
   const [stravaAuth, setStravaAuth] = useState(null); // { accessToken, refreshToken, expiresAt, athleteName, lastSyncAt }
   const [stravaSyncStatus, setStravaSyncStatus] = useState(null);
   const [stravaConnecting, setStravaConnecting] = useState(false);
+  const [withingsAuth, setWithingsAuth] = useState(null); // { accessToken, refreshToken, expiresAt, lastSyncAt }
+  const [withingsSyncStatus, setWithingsSyncStatus] = useState(null);
+  const [withingsConnecting, setWithingsConnecting] = useState(false);
+  const [weightLogs, setWeightLogs] = useState([]); // [ {id, date, weightLb, bodyFatPct, muscleMassLb, stravaId?} ]
 
   useEffect(() => {
     (async () => {
       const rd = await loadJSON("race-date", "2027-01-30");
       const psd = await loadJSON("plan-start-date", "2026-07-27");
-      const pr = await loadJSON("profile", { baseTDEE: 2400, weightLb: "", weightLossMode: false, deficitKcal: 400, reducedFrequency: false, usdaApiKey: "" });
+      const pr = await loadJSON("profile", { baseTDEE: 2400, weightLb: "", weightLossMode: false, deficitKcal: 400, reducedFrequency: false, usdaApiKey: "", withingsClientId: "" });
       const rn = await loadJSON("runs", []);
       const sl = await loadJSON("strength-logs", []);
       const ml = await loadJSON("meals", {});
       const sms = await loadJSON("saved-meal-sets", []);
       const sa = await loadJSON("strava-auth", null);
+      const wa = await loadJSON("withings-auth", null);
+      const wl = await loadJSON("weight-logs", []);
       setRaceDate(rd);
       setPlanStartDate(psd);
       setProfile(pr);
@@ -745,12 +751,34 @@ export default function UltraTrainingApp() {
       setMeals(ml);
       setSavedMealSets(sms);
       setStravaAuth(sa);
+      setWithingsAuth(wa);
+      setWeightLogs(wl);
       setReady(true);
 
-      // If Strava just redirected back with ?code=..., exchange it for tokens.
+      // If Strava or Withings just redirected back with ?code=..., exchange
+      // it for tokens. Both flows land on the same URL, so `state` (set when
+      // the redirect was sent out) is what tells us which one this is.
       const params = new URLSearchParams(window.location.search);
       const code = params.get("code");
-      if (code) {
+      const state = params.get("state");
+      if (code && state === "withings") {
+        setWithingsConnecting(true);
+        try {
+          const redirectUri = window.location.origin + window.location.pathname;
+          const res = await fetch(`/api/withings-exchange?code=${encodeURIComponent(code)}&redirect_uri=${encodeURIComponent(redirectUri)}`);
+          const data = await res.json();
+          if (res.ok) {
+            const newAuth = { accessToken: data.access_token, refreshToken: data.refresh_token, expiresAt: data.expires_at, lastSyncAt: null };
+            setWithingsAuth(newAuth);
+            saveJSON("withings-auth", newAuth);
+          }
+        } catch (e) {
+          console.error("Withings connect failed", e);
+        } finally {
+          setWithingsConnecting(false);
+          window.history.replaceState({}, "", window.location.pathname);
+        }
+      } else if (code) {
         setStravaConnecting(true);
         try {
           const res = await fetch(`/api/strava-exchange?code=${encodeURIComponent(code)}`);
@@ -800,10 +828,16 @@ export default function UltraTrainingApp() {
   useEffect(() => {
     if (ready) saveJSON("strava-auth", stravaAuth);
   }, [stravaAuth, ready]);
+  useEffect(() => {
+    if (ready) saveJSON("withings-auth", withingsAuth);
+  }, [withingsAuth, ready]);
+  useEffect(() => {
+    if (ready) saveJSON("weight-logs", weightLogs);
+  }, [weightLogs, ready]);
 
   const connectStrava = () => {
     const redirectUri = window.location.origin + window.location.pathname;
-    const url = `https://www.strava.com/oauth/authorize?client_id=${STRAVA_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&approval_prompt=auto&scope=activity:read_all`;
+    const url = `https://www.strava.com/oauth/authorize?client_id=${STRAVA_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&approval_prompt=auto&scope=activity:read_all&state=strava`;
     window.location.href = url;
   };
   const disconnectStrava = () => {
@@ -874,6 +908,68 @@ export default function UltraTrainingApp() {
       setStravaSyncStatus(totalNew > 0 ? `Synced ${totalNew} new session${totalNew !== 1 ? "s" : ""}.` : "Up to date — nothing new.");
     } catch (e) {
       setStravaSyncStatus("Sync failed — check your connection and try again.");
+    }
+  };
+
+  const connectWithings = () => {
+    if (!profile.withingsClientId) return;
+    const redirectUri = window.location.origin + window.location.pathname;
+    const url = `https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=${encodeURIComponent(profile.withingsClientId)}&state=withings&scope=user.metrics&redirect_uri=${encodeURIComponent(redirectUri)}`;
+    window.location.href = url;
+  };
+  const disconnectWithings = () => {
+    setWithingsAuth(null);
+    setWithingsSyncStatus(null);
+  };
+
+  const syncWithings = async () => {
+    if (!withingsAuth) return;
+    setWithingsSyncStatus("Syncing…");
+    try {
+      const after = Math.floor((Date.now() - 45 * 24 * 60 * 60 * 1000) / 1000);
+      const res = await fetch("/api/withings-measurements", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          accessToken: withingsAuth.accessToken,
+          refreshToken: withingsAuth.refreshToken,
+          expiresAt: withingsAuth.expiresAt,
+          after,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setWithingsSyncStatus(`Sync failed: ${data.error?.message || JSON.stringify(data.error) || "unknown error"}`);
+        return;
+      }
+      const KG_TO_LB = 2.20462;
+      const existingGrpIds = new Set(weightLogs.map((w) => w.grpid).filter(Boolean));
+      const newEntries = (data.measuregrps || [])
+        .filter((g) => !existingGrpIds.has(g.grpid))
+        .map((g) => {
+          const rec = { id: uid(), grpid: g.grpid, date: fmtDate(new Date(g.date * 1000)) };
+          (g.measures || []).forEach((m) => {
+            const value = m.value * Math.pow(10, m.unit);
+            if (m.type === 1) rec.weightLb = Math.round(value * KG_TO_LB * 10) / 10;
+            if (m.type === 6) rec.bodyFatPct = Math.round(value * 10) / 10;
+            if (m.type === 76) rec.muscleMassLb = Math.round(value * KG_TO_LB * 10) / 10;
+          });
+          return rec;
+        })
+        .filter((r) => r.weightLb || r.bodyFatPct || r.muscleMassLb);
+
+      let updatedLogs = weightLogs;
+      if (newEntries.length > 0) {
+        updatedLogs = [...newEntries, ...weightLogs].sort((a, b) => new Date(b.date) - new Date(a.date));
+        setWeightLogs(updatedLogs);
+        const mostRecentWeight = updatedLogs.find((r) => r.weightLb);
+        if (mostRecentWeight) setProfile((p) => ({ ...p, weightLb: mostRecentWeight.weightLb }));
+      }
+      const updatedAuth = { ...withingsAuth, accessToken: data.access_token, refreshToken: data.refresh_token, expiresAt: data.expires_at, lastSyncAt: new Date().toISOString() };
+      setWithingsAuth(updatedAuth);
+      setWithingsSyncStatus(newEntries.length > 0 ? `Synced ${newEntries.length} new reading${newEntries.length !== 1 ? "s" : ""}.` : "Up to date — nothing new.");
+    } catch (e) {
+      setWithingsSyncStatus("Sync failed — check your connection and try again.");
     }
   };
 
@@ -1004,7 +1100,18 @@ export default function UltraTrainingApp() {
         )}
         {tab === "plan" && <PlanView plan={plan} />}
         {tab === "strength" && <Strength currentPhase={currentWeek.phase} />}
-        {tab === "progress" && <Progress plan={plan} currentWeek={currentWeek} runs={runs} strengthLogs={strengthLogs} />}
+        {tab === "progress" && (
+          <Progress
+            plan={plan}
+            currentWeek={currentWeek}
+            runs={runs}
+            strengthLogs={strengthLogs}
+            weightLogs={weightLogs}
+            withingsAuth={withingsAuth}
+            onSyncWithings={syncWithings}
+            withingsSyncStatus={withingsSyncStatus}
+          />
+        )}
         {tab === "nutrition" && (
           <Nutrition
             meals={meals}
@@ -1029,6 +1136,10 @@ export default function UltraTrainingApp() {
             onConnectStrava={connectStrava}
             onDisconnectStrava={disconnectStrava}
             stravaConnecting={stravaConnecting}
+            withingsAuth={withingsAuth}
+            onConnectWithings={connectWithings}
+            onDisconnectWithings={disconnectWithings}
+            withingsConnecting={withingsConnecting}
           />
         )}
       </div>
@@ -1368,7 +1479,7 @@ function fmtShort(dateStr) {
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
-function Progress({ plan, currentWeek, runs, strengthLogs }) {
+function Progress({ plan, currentWeek, runs, strengthLogs, weightLogs, withingsAuth, onSyncWithings, withingsSyncStatus }) {
   const weeklyData = useMemo(() => {
     return plan.weeks
       .filter((w) => w.week <= currentWeek.week)
@@ -1414,6 +1525,13 @@ function Progress({ plan, currentWeek, runs, strengthLogs }) {
     const sec = Math.round((p - min) * 60);
     return `${min}:${sec.toString().padStart(2, "0")}/mi`;
   };
+
+  const weightTrend = useMemo(() => {
+    return (weightLogs || [])
+      .slice()
+      .sort((a, b) => new Date(a.date) - new Date(b.date))
+      .map((w) => ({ date: fmtShort(w.date), weight: w.weightLb || null, bodyFat: w.bodyFatPct || null, muscle: w.muscleMassLb || null }));
+  }, [weightLogs]);
 
   const totalMiles = useMemo(() => runs.reduce((s, r) => s + Number(r.distance || 0), 0), [runs]);
   const totalVert = useMemo(() => runs.reduce((s, r) => s + Number(r.elevation || 0), 0), [runs]);
@@ -1536,6 +1654,39 @@ function Progress({ plan, currentWeek, runs, strengthLogs }) {
               Pace axis is reversed so "up" always means faster. If pace is dropping (going up on the chart) while HR holds steady or falls, that's your aerobic fitness improving — you're covering more ground for the same effort.
             </div>
           </>
+        )}
+      </Card>
+
+      <Card>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8 }}>
+          <Eyebrow>Body composition</Eyebrow>
+          {withingsAuth && (
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <Button variant="ghost" onClick={onSyncWithings}>Sync Withings</Button>
+              <div style={{ color: COLORS.inkSoft, fontSize: 12 }}>{withingsSyncStatus || ""}</div>
+            </div>
+          )}
+        </div>
+        {!withingsAuth ? (
+          <div style={{ color: COLORS.inkSoft, fontSize: 14, marginTop: 6 }}>Connect Withings in Settings to start tracking weight and body composition automatically.</div>
+        ) : weightTrend.length === 0 ? (
+          <div style={{ color: COLORS.inkSoft, fontSize: 14, marginTop: 6 }}>No readings yet — tap "Sync Withings" above.</div>
+        ) : (
+          <div style={{ height: 220, marginTop: 10 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={weightTrend} margin={{ top: 8, right: 8, left: -10, bottom: 0 }}>
+                <CartesianGrid stroke={COLORS.line} strokeDasharray="3 3" />
+                <XAxis dataKey="date" stroke={COLORS.inkSoft} fontSize={11} />
+                <YAxis yAxisId="weight" stroke={COLORS.amber} fontSize={11} width={40} domain={["dataMin - 3", "dataMax + 3"]} />
+                <YAxis yAxisId="pct" orientation="right" stroke={COLORS.moss} fontSize={11} width={36} domain={["dataMin - 2", "dataMax + 2"]} />
+                <Tooltip contentStyle={{ background: COLORS.surface, border: `1px solid ${COLORS.line}`, fontSize: 12 }} labelStyle={{ color: COLORS.paper }} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Line yAxisId="weight" type="monotone" dataKey="weight" name="Weight (lb)" stroke={COLORS.amber} strokeWidth={2} dot={{ r: 3 }} connectNulls />
+                <Line yAxisId="pct" type="monotone" dataKey="bodyFat" name="Body fat %" stroke={COLORS.moss} strokeWidth={2} dot={{ r: 3 }} connectNulls />
+                <Line yAxisId="weight" type="monotone" dataKey="muscle" name="Muscle mass (lb)" stroke={COLORS.rust} strokeWidth={2} strokeDasharray="4 3" dot={{ r: 2 }} connectNulls />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
         )}
       </Card>
 
@@ -2164,7 +2315,23 @@ function Nutrition({
   );
 }
 
-function Settings({ raceDate, setRaceDate, planStartDate, setPlanStartDate, profile, setProfile, onDataImported, stravaAuth, onConnectStrava, onDisconnectStrava, stravaConnecting }) {
+function Settings({
+  raceDate,
+  setRaceDate,
+  planStartDate,
+  setPlanStartDate,
+  profile,
+  setProfile,
+  onDataImported,
+  stravaAuth,
+  onConnectStrava,
+  onDisconnectStrava,
+  stravaConnecting,
+  withingsAuth,
+  onConnectWithings,
+  onDisconnectWithings,
+  withingsConnecting,
+}) {
   const [importMsg, setImportMsg] = useState(null);
   const fileInputRef = React.useRef(null);
 
@@ -2289,6 +2456,35 @@ function Settings({ raceDate, setRaceDate, planStartDate, setPlanStartDate, prof
         )}
       </Card>
       <Card>
+        <Eyebrow>Withings</Eyebrow>
+        {withingsAuth ? (
+          <div>
+            <div style={{ color: COLORS.ink, fontSize: 13.5 }}>Connected.</div>
+            <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+              <Button variant="danger" onClick={onDisconnectWithings}>Disconnect</Button>
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div style={{ color: COLORS.inkSoft, fontSize: 12.5, marginBottom: 12, lineHeight: 1.6 }}>
+              Connect Withings to pull in weight, body fat %, and muscle mass automatically from your scale. Needs a free Withings developer app first — register at{" "}
+              <span style={{ color: COLORS.amber }}>account.withings.com/partner/add_oauth2</span>, set the callback URI to this site's full URL, and paste the Client ID below (keep the Client Secret out of here — that one goes into Vercel's environment variables instead).
+            </div>
+            <div style={{ maxWidth: 320, marginBottom: 12 }}>
+              <label style={{ fontSize: 12, color: COLORS.inkSoft }}>Withings Client ID</label>
+              <Input
+                type="text"
+                placeholder="Paste your Withings Client ID"
+                value={profile.withingsClientId}
+                onChange={(e) => setProfile({ ...profile, withingsClientId: e.target.value })}
+                style={{ marginTop: 4 }}
+              />
+            </div>
+            <Button onClick={onConnectWithings}>{withingsConnecting ? "Connecting…" : "Connect Withings"}</Button>
+          </div>
+        )}
+      </Card>
+      <Card>
         <Eyebrow>Backup &amp; restore</Eyebrow>
         <div style={{ color: COLORS.inkSoft, fontSize: 12.5, marginBottom: 12, lineHeight: 1.6 }}>
           Your data lives in this browser only. Export a backup file occasionally (e.g. before switching phones, clearing browser data, or just for peace of mind), and you can restore it here any time.
@@ -2303,7 +2499,7 @@ function Settings({ raceDate, setRaceDate, planStartDate, setPlanStartDate, prof
       <Card style={{ borderColor: COLORS.amber + "55" }}>
         <Eyebrow>Coming next</Eyebrow>
         <div style={{ color: COLORS.inkSoft, fontSize: 13, lineHeight: 1.6 }}>
-          Strava auto-sync for runs · Withings auto-sync for weight/body comp · Garmin (pending API approval) · smarter meal-plan suggestions tied to weekly training load.
+          Garmin (pending API approval) · smarter meal-plan suggestions tied to weekly training load.
         </div>
       </Card>
     </div>

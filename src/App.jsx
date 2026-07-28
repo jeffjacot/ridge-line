@@ -25,6 +25,7 @@ const COLORS = {
 };
 
 const uid = () => Math.random().toString(36).slice(2, 10);
+const STRAVA_CLIENT_ID = "267417";
 const fmtDate = (d) => d.toISOString().slice(0, 10);
 const todayStr = () => fmtDate(new Date());
 const daysBetween = (a, b) => Math.round((b - a) / 86400000);
@@ -722,6 +723,9 @@ export default function UltraTrainingApp() {
   const [strengthLogs, setStrengthLogs] = useState([]);
   const [meals, setMeals] = useState({}); // { 'YYYY-MM-DD': [ {id,name,cal,protein,carbs,fat} ] }
   const [savedMealSets, setSavedMealSets] = useState([]); // [ {id,name,items:[{name,cal,protein,carbs,fat}]} ]
+  const [stravaAuth, setStravaAuth] = useState(null); // { accessToken, refreshToken, expiresAt, athleteName, lastSyncAt }
+  const [stravaSyncStatus, setStravaSyncStatus] = useState(null);
+  const [stravaConnecting, setStravaConnecting] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -732,6 +736,7 @@ export default function UltraTrainingApp() {
       const sl = await loadJSON("strength-logs", []);
       const ml = await loadJSON("meals", {});
       const sms = await loadJSON("saved-meal-sets", []);
+      const sa = await loadJSON("strava-auth", null);
       setRaceDate(rd);
       setPlanStartDate(psd);
       setProfile(pr);
@@ -739,7 +744,35 @@ export default function UltraTrainingApp() {
       setStrengthLogs(sl);
       setMeals(ml);
       setSavedMealSets(sms);
+      setStravaAuth(sa);
       setReady(true);
+
+      // If Strava just redirected back with ?code=..., exchange it for tokens.
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get("code");
+      if (code) {
+        setStravaConnecting(true);
+        try {
+          const res = await fetch(`/api/strava-exchange?code=${encodeURIComponent(code)}`);
+          const data = await res.json();
+          if (res.ok) {
+            const newAuth = {
+              accessToken: data.access_token,
+              refreshToken: data.refresh_token,
+              expiresAt: data.expires_at,
+              athleteName: data.athlete_name,
+              lastSyncAt: null,
+            };
+            setStravaAuth(newAuth);
+            saveJSON("strava-auth", newAuth);
+          }
+        } catch (e) {
+          console.error("Strava connect failed", e);
+        } finally {
+          setStravaConnecting(false);
+          window.history.replaceState({}, "", window.location.pathname);
+        }
+      }
     })();
   }, []);
 
@@ -764,6 +797,64 @@ export default function UltraTrainingApp() {
   useEffect(() => {
     if (ready) saveJSON("saved-meal-sets", savedMealSets);
   }, [savedMealSets, ready]);
+  useEffect(() => {
+    if (ready) saveJSON("strava-auth", stravaAuth);
+  }, [stravaAuth, ready]);
+
+  const connectStrava = () => {
+    const redirectUri = window.location.origin + window.location.pathname;
+    const url = `https://www.strava.com/oauth/authorize?client_id=${STRAVA_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&approval_prompt=auto&scope=activity:read_all`;
+    window.location.href = url;
+  };
+  const disconnectStrava = () => {
+    setStravaAuth(null);
+    setStravaSyncStatus(null);
+  };
+
+  const syncStrava = async () => {
+    if (!stravaAuth) return;
+    setStravaSyncStatus("Syncing…");
+    try {
+      const after = stravaAuth.lastSyncAt
+        ? Math.floor(new Date(stravaAuth.lastSyncAt).getTime() / 1000)
+        : Math.floor((Date.now() - 90 * 24 * 60 * 60 * 1000) / 1000); // first sync: last 90 days
+      const res = await fetch("/api/strava-activities", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          accessToken: stravaAuth.accessToken,
+          refreshToken: stravaAuth.refreshToken,
+          expiresAt: stravaAuth.expiresAt,
+          after,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setStravaSyncStatus(`Sync failed: ${data.error?.message || JSON.stringify(data.error) || "unknown error"}`);
+        return;
+      }
+      const existingIds = new Set(runs.map((r) => r.stravaId).filter(Boolean));
+      const newRuns = (data.activities || [])
+        .filter((a) => a.type === "Run" && !existingIds.has(a.id))
+        .map((a) => ({
+          id: uid(),
+          stravaId: a.id,
+          date: (a.start_date_local || a.start_date || "").slice(0, 10),
+          type: "Easy",
+          distance: Math.round((a.distance / 1609.34) * 100) / 100,
+          durationMin: Math.round(a.moving_time / 60),
+          elevation: Math.round((a.total_elevation_gain || 0) * 3.28084),
+          avgHR: a.average_heartrate ? Math.round(a.average_heartrate) : "",
+          notes: a.name || "",
+        }));
+      if (newRuns.length > 0) setRuns([...newRuns, ...runs]);
+      const updatedAuth = { ...stravaAuth, accessToken: data.access_token, refreshToken: data.refresh_token, expiresAt: data.expires_at, lastSyncAt: new Date().toISOString() };
+      setStravaAuth(updatedAuth);
+      setStravaSyncStatus(newRuns.length > 0 ? `Synced ${newRuns.length} new run${newRuns.length !== 1 ? "s" : ""}.` : "Up to date — nothing new.");
+    } catch (e) {
+      setStravaSyncStatus("Sync failed — check your connection and try again.");
+    }
+  };
 
   const plan = useMemo(() => buildPlan(raceDate, planStartDate, profile.reducedFrequency), [raceDate, planStartDate, profile.reducedFrequency]);
   const daysToRace = daysBetween(new Date(), new Date(raceDate + "T00:00:00"));
@@ -880,7 +971,16 @@ export default function UltraTrainingApp() {
           />
         )}
         {tab === "log" && (
-          <TrainingLog runs={runs} setRuns={setRuns} strengthLogs={strengthLogs} setStrengthLogs={setStrengthLogs} currentPhase={currentWeek.phase} />
+          <TrainingLog
+            runs={runs}
+            setRuns={setRuns}
+            strengthLogs={strengthLogs}
+            setStrengthLogs={setStrengthLogs}
+            currentPhase={currentWeek.phase}
+            stravaAuth={stravaAuth}
+            onSyncStrava={syncStrava}
+            stravaSyncStatus={stravaSyncStatus}
+          />
         )}
         {tab === "plan" && <PlanView plan={plan} />}
         {tab === "strength" && <Strength currentPhase={currentWeek.phase} />}
@@ -905,6 +1005,10 @@ export default function UltraTrainingApp() {
             profile={profile}
             setProfile={setProfile}
             onDataImported={() => window.location.reload()}
+            stravaAuth={stravaAuth}
+            onConnectStrava={connectStrava}
+            onDisconnectStrava={disconnectStrava}
+            stravaConnecting={stravaConnecting}
           />
         )}
       </div>
@@ -1043,7 +1147,7 @@ function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalor
   );
 }
 
-function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, currentPhase }) {
+function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, currentPhase, stravaAuth, onSyncStrava, stravaSyncStatus }) {
   const [viewDate, setViewDate] = useState(todayStr());
   const [form, setForm] = useState({ date: viewDate, type: "Easy", distance: "", durationMin: "", elevation: "", avgHR: "", notes: "" });
   const [sForm, setSForm] = useState({ date: viewDate, exercise: "", sets: "", reps: "", weight: "", notes: "" });
@@ -1114,6 +1218,14 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, currentPhas
       <Card>
         <Eyebrow>Viewing</Eyebrow>
         <DateNav date={viewDate} setDate={setViewDate} />
+        {stravaAuth && (
+          <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${COLORS.line}`, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <Button variant="ghost" onClick={onSyncStrava}>Sync Strava</Button>
+            <div style={{ color: COLORS.inkSoft, fontSize: 12 }}>
+              {stravaSyncStatus || (stravaAuth.lastSyncAt ? `Last synced ${fmtShort(stravaAuth.lastSyncAt.slice(0, 10))}` : "Not synced yet")}
+            </div>
+          </div>
+        )}
       </Card>
 
       <Card>
@@ -1203,7 +1315,10 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, currentPhas
             ) : (
               <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${COLORS.line}` }}>
                 <div>
-                  <div style={{ color: COLORS.paper, fontSize: 14, fontWeight: 600 }}>{r.type}</div>
+                  <div style={{ color: COLORS.paper, fontSize: 14, fontWeight: 600 }}>
+                    {r.type}
+                    {r.stravaId && <span style={{ color: COLORS.amber, fontSize: 11, fontWeight: 400 }}> · Strava</span>}
+                  </div>
                   <div style={{ color: COLORS.inkSoft, fontSize: 12 }}>
                     {r.distance || 0} mi · {r.durationMin || 0} min · {pace(r)}
                     {Number(r.elevation) > 0 ? ` · ${r.elevation} ft gain` : ""}
@@ -2077,7 +2192,7 @@ function Nutrition({
   );
 }
 
-function Settings({ raceDate, setRaceDate, planStartDate, setPlanStartDate, profile, setProfile, onDataImported }) {
+function Settings({ raceDate, setRaceDate, planStartDate, setPlanStartDate, profile, setProfile, onDataImported, stravaAuth, onConnectStrava, onDisconnectStrava, stravaConnecting }) {
   const [importMsg, setImportMsg] = useState(null);
   const fileInputRef = React.useRef(null);
 
@@ -2180,6 +2295,26 @@ function Settings({ raceDate, setRaceDate, planStartDate, setPlanStartDate, prof
         <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 10, lineHeight: 1.6 }}>
           The deficit is automatically skipped on Long Run and Back-to-Back days so you're fully fueled for the sessions that matter most — it only applies on easier days. A 400-500 kcal/day deficit is roughly 1 lb/week, so 15 lb is about 15 weeks; going much faster than that while training volume is climbing raises injury and under-fueling risk. There's also a floor so the target never drops below a safe minimum regardless of the deficit you set.
         </div>
+      </Card>
+      <Card>
+        <Eyebrow>Strava</Eyebrow>
+        {stravaAuth ? (
+          <div>
+            <div style={{ color: COLORS.ink, fontSize: 13.5 }}>
+              Connected{stravaAuth.athleteName ? ` as ${stravaAuth.athleteName}` : ""}.
+            </div>
+            <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+              <Button variant="danger" onClick={onDisconnectStrava}>Disconnect</Button>
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div style={{ color: COLORS.inkSoft, fontSize: 12.5, marginBottom: 12, lineHeight: 1.6 }}>
+              Connect your Strava account to pull runs in automatically instead of entering them by hand. You'll be sent to Strava to approve access, then back here.
+            </div>
+            <Button onClick={onConnectStrava}>{stravaConnecting ? "Connecting…" : "Connect Strava"}</Button>
+          </div>
+        )}
       </Card>
       <Card>
         <Eyebrow>Backup &amp; restore</Eyebrow>

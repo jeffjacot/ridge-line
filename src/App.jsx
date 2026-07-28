@@ -852,9 +852,26 @@ export default function UltraTrainingApp() {
           notes: a.name || "",
         }));
       if (newRuns.length > 0) setRuns([...newRuns, ...runs]);
+
+      const existingStrengthIds = new Set(strengthLogs.map((s) => s.stravaId).filter(Boolean));
+      const newStrength = (data.activities || [])
+        .filter((a) => a.type === "WeightTraining" && !existingStrengthIds.has(a.id))
+        .map((a) => ({
+          id: uid(),
+          stravaId: a.id,
+          date: (a.start_date_local || a.start_date || "").slice(0, 10),
+          durationMin: Math.round(a.moving_time / 60),
+          avgHR: a.average_heartrate ? Math.round(a.average_heartrate) : "",
+          maxHR: a.max_heartrate ? Math.round(a.max_heartrate) : "",
+          calories: a.calories ? Math.round(a.calories) : "",
+          notes: a.name || "",
+        }));
+      if (newStrength.length > 0) setStrengthLogs([...newStrength, ...strengthLogs]);
+
+      const totalNew = newRuns.length + newStrength.length;
       const updatedAuth = { ...stravaAuth, accessToken: data.access_token, refreshToken: data.refresh_token, expiresAt: data.expires_at, lastSyncAt: new Date().toISOString() };
       setStravaAuth(updatedAuth);
-      setStravaSyncStatus(newRuns.length > 0 ? `Synced ${newRuns.length} new session${newRuns.length !== 1 ? "s" : ""}.` : "Up to date — nothing new.");
+      setStravaSyncStatus(totalNew > 0 ? `Synced ${totalNew} new session${totalNew !== 1 ? "s" : ""}.` : "Up to date — nothing new.");
     } catch (e) {
       setStravaSyncStatus("Sync failed — check your connection and try again.");
     }
@@ -980,7 +997,6 @@ export default function UltraTrainingApp() {
             setRuns={setRuns}
             strengthLogs={strengthLogs}
             setStrengthLogs={setStrengthLogs}
-            currentPhase={currentWeek.phase}
             stravaAuth={stravaAuth}
             onSyncStrava={syncStrava}
             stravaSyncStatus={stravaSyncStatus}
@@ -1151,20 +1167,18 @@ function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalor
   );
 }
 
-function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, currentPhase, stravaAuth, onSyncStrava, stravaSyncStatus }) {
+function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, stravaAuth, onSyncStrava, stravaSyncStatus }) {
   const [viewDate, setViewDate] = useState(todayStr());
   const [form, setForm] = useState({ date: viewDate, type: "Easy", distance: "", durationMin: "", elevation: "", avgHR: "", notes: "" });
-  const [sForm, setSForm] = useState({ date: viewDate, exercise: "", sets: "", reps: "", weight: "", notes: "" });
   const [editRunId, setEditRunId] = useState(null);
   const [editRunForm, setEditRunForm] = useState(null);
   const [editStrengthId, setEditStrengthId] = useState(null);
   const [editStrengthForm, setEditStrengthForm] = useState(null);
 
-  // Keep the add-forms' date in sync with whichever day you're viewing —
+  // Keep the add-form's date in sync with whichever day you're viewing —
   // still overridable by hand if you want to log for a different day.
   useEffect(() => {
     setForm((f) => ({ ...f, date: viewDate }));
-    setSForm((f) => ({ ...f, date: viewDate }));
   }, [viewDate]);
 
   const addRun = () => {
@@ -1183,12 +1197,6 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, currentPhas
     setEditRunForm(null);
   };
 
-  const addStrength = () => {
-    const exercise = sForm.exercise === "__custom" ? sForm.customName : sForm.exercise;
-    if (!exercise) return;
-    setStrengthLogs([{ id: uid(), ...sForm, exercise }, ...strengthLogs]);
-    setSForm({ date: viewDate, exercise: "", sets: "", reps: "", weight: "", notes: "" });
-  };
   const removeStrength = (id) => setStrengthLogs(strengthLogs.filter((s) => s.id !== id));
   const startEditStrength = (s) => {
     setEditStrengthId(s.id);
@@ -1210,8 +1218,6 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, currentPhas
     return `${min}:${sec.toString().padStart(2, "0")}/mi`;
   };
 
-  const phaseKey = strengthKeyForPhase(currentPhase);
-  const exerciseOptions = STRENGTH_LIBRARY[phaseKey]?.exercises.map((e) => e.name) || [];
   const runTypeOptions = ["Easy", "Long Run", "Tempo", "Hill/Vert", "Back-to-Back", "Race Sim", "Walk"];
 
   const dayRuns = runs.filter((r) => r.date === viewDate);
@@ -1252,39 +1258,6 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, currentPhas
         </div>
         <Input placeholder="Notes — terrain, effort, fueling…" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} style={{ marginTop: 10 }} />
         <Button onClick={addRun} style={{ marginTop: 12 }}>Add run</Button>
-      </Card>
-
-      <Card>
-        <Eyebrow>Log strength training — {fmtShort(viewDate)}</Eyebrow>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px,1fr))", gap: 10 }}>
-          <Input type="date" value={sForm.date} onChange={(e) => setSForm({ ...sForm, date: e.target.value })} />
-          <select
-            value={sForm.exercise}
-            onChange={(e) => setSForm({ ...sForm, exercise: e.target.value })}
-            style={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "8px 10px", color: COLORS.ink }}
-          >
-            <option value="">Select exercise…</option>
-            {exerciseOptions.map((name) => (
-              <option key={name} value={name}>{name}</option>
-            ))}
-            <option value="__custom">Other (type below)</option>
-          </select>
-          <Input placeholder="Sets" type="number" value={sForm.sets} onChange={(e) => setSForm({ ...sForm, sets: e.target.value })} />
-          <Input placeholder="Reps" type="number" value={sForm.reps} onChange={(e) => setSForm({ ...sForm, reps: e.target.value })} />
-          <Input placeholder="Weight (lb)" type="number" value={sForm.weight} onChange={(e) => setSForm({ ...sForm, weight: e.target.value })} />
-        </div>
-        {sForm.exercise === "__custom" && (
-          <Input
-            placeholder="Custom exercise name"
-            value={sForm.customName || ""}
-            onChange={(e) => setSForm({ ...sForm, customName: e.target.value })}
-            style={{ marginTop: 10 }}
-          />
-        )}
-        <Input placeholder="Notes" value={sForm.notes} onChange={(e) => setSForm({ ...sForm, notes: e.target.value })} style={{ marginTop: 10 }} />
-        <Button onClick={addStrength} style={{ marginTop: 12 }}>
-          Add strength session
-        </Button>
       </Card>
 
       <Card>
@@ -1342,17 +1315,20 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, currentPhas
 
       <Card>
         <Eyebrow>Strength — {fmtShort(viewDate)}</Eyebrow>
-        {dayStrength.length === 0 && <div style={{ color: COLORS.inkSoft, fontSize: 14 }}>No strength sessions logged for this day.</div>}
+        <div style={{ color: COLORS.inkSoft, fontSize: 12, marginBottom: 10, lineHeight: 1.5 }}>
+          Exercises are already prescribed in the Strength tab — this just tracks that a session happened and how it felt, pulled in from Strava (duration, heart rate, calories). {!stravaAuth && "Connect Strava in Settings to start populating this automatically."}
+        </div>
+        {dayStrength.length === 0 && <div style={{ color: COLORS.inkSoft, fontSize: 14 }}>No strength session logged for this day.</div>}
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {dayStrength.map((s) =>
             editStrengthId === s.id ? (
               <div key={s.id} style={{ padding: "10px 0", borderBottom: `1px solid ${COLORS.line}` }}>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px,1fr))", gap: 8 }}>
                   <Input type="date" value={editStrengthForm.date} onChange={(e) => setEditStrengthForm({ ...editStrengthForm, date: e.target.value })} />
-                  <Input placeholder="Exercise" value={editStrengthForm.exercise} onChange={(e) => setEditStrengthForm({ ...editStrengthForm, exercise: e.target.value })} />
-                  <Input placeholder="Sets" type="number" value={editStrengthForm.sets} onChange={(e) => setEditStrengthForm({ ...editStrengthForm, sets: e.target.value })} />
-                  <Input placeholder="Reps" type="number" value={editStrengthForm.reps} onChange={(e) => setEditStrengthForm({ ...editStrengthForm, reps: e.target.value })} />
-                  <Input placeholder="Weight (lb)" type="number" value={editStrengthForm.weight} onChange={(e) => setEditStrengthForm({ ...editStrengthForm, weight: e.target.value })} />
+                  <Input placeholder="Duration (min)" type="number" value={editStrengthForm.durationMin} onChange={(e) => setEditStrengthForm({ ...editStrengthForm, durationMin: e.target.value })} />
+                  <Input placeholder="Avg HR" type="number" value={editStrengthForm.avgHR} onChange={(e) => setEditStrengthForm({ ...editStrengthForm, avgHR: e.target.value })} />
+                  <Input placeholder="Max HR" type="number" value={editStrengthForm.maxHR} onChange={(e) => setEditStrengthForm({ ...editStrengthForm, maxHR: e.target.value })} />
+                  <Input placeholder="Calories" type="number" value={editStrengthForm.calories} onChange={(e) => setEditStrengthForm({ ...editStrengthForm, calories: e.target.value })} />
                 </div>
                 <Input placeholder="Notes" value={editStrengthForm.notes} onChange={(e) => setEditStrengthForm({ ...editStrengthForm, notes: e.target.value })} style={{ marginTop: 8 }} />
                 <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
@@ -1363,11 +1339,16 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, currentPhas
             ) : (
               <div key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${COLORS.line}` }}>
                 <div>
-                  <div style={{ color: COLORS.paper, fontSize: 14, fontWeight: 600 }}>{s.exercise}</div>
-                  <div style={{ color: COLORS.inkSoft, fontSize: 12 }}>
-                    {s.sets || 0} sets x {s.reps || 0} reps{s.weight ? ` · ${s.weight} lb` : ""}
+                  <div style={{ color: COLORS.paper, fontSize: 14, fontWeight: 600 }}>
+                    {s.notes || "Strength session"}
+                    {s.stravaId && <span style={{ color: COLORS.amber, fontSize: 11, fontWeight: 400 }}> · Strava</span>}
                   </div>
-                  {s.notes && <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 2 }}>{s.notes}</div>}
+                  <div style={{ color: COLORS.inkSoft, fontSize: 12 }}>
+                    {s.durationMin || 0} min
+                    {s.avgHR ? ` · ${s.avgHR} bpm avg` : ""}
+                    {s.maxHR ? ` (max ${s.maxHR})` : ""}
+                    {s.calories ? ` · ${s.calories} cal` : ""}
+                  </div>
                 </div>
                 <div style={{ display: "flex", gap: 8 }}>
                   <Button variant="ghost" onClick={() => startEditStrength(s)}>Edit</Button>
@@ -1439,15 +1420,18 @@ function Progress({ plan, currentWeek, runs, strengthLogs }) {
   const totalRuns = runs.length;
   const totalStrengthSessions = strengthLogs.length;
 
-  const strengthByExercise = useMemo(() => {
-    const groups = {};
-    strengthLogs.forEach((s) => {
-      if (!groups[s.exercise]) groups[s.exercise] = [];
-      groups[s.exercise].push(s);
-    });
-    Object.values(groups).forEach((arr) => arr.sort((a, b) => new Date(a.date) - new Date(b.date)));
-    return groups;
-  }, [strengthLogs]);
+  const strengthSummarySessions = useMemo(
+    () => strengthLogs.filter((s) => !s.exercise).sort((a, b) => new Date(b.date) - new Date(a.date)),
+    [strengthLogs]
+  );
+  const strengthSummaryStats = useMemo(() => {
+    const withHR = strengthSummarySessions.filter((s) => s.avgHR);
+    return {
+      count: strengthSummarySessions.length,
+      totalMin: strengthSummarySessions.reduce((s, x) => s + Number(x.durationMin || 0), 0),
+      avgHR: withHR.length ? Math.round(withHR.reduce((s, x) => s + Number(x.avgHR), 0) / withHR.length) : null,
+    };
+  }, [strengthSummarySessions]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
@@ -1556,44 +1540,28 @@ function Progress({ plan, currentWeek, runs, strengthLogs }) {
       </Card>
 
       <Card>
-        <Eyebrow>Strength progression</Eyebrow>
-        {Object.keys(strengthByExercise).length === 0 && (
-          <div style={{ color: COLORS.inkSoft, fontSize: 14 }}>No strength sessions logged yet — add some from the Training Log tab.</div>
+        <Eyebrow>Strength sessions</Eyebrow>
+        {strengthSummarySessions.length === 0 ? (
+          <div style={{ color: COLORS.inkSoft, fontSize: 14 }}>No strength sessions synced yet — connect Strava in Settings, then Sync from the Log tab.</div>
+        ) : (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px,1fr))", gap: 14, marginBottom: 14 }}>
+              <Stat label="Sessions" value={strengthSummaryStats.count} />
+              <Stat label="Total time" value={Math.round(strengthSummaryStats.totalMin / 6) / 10} unit="hrs" />
+              {strengthSummaryStats.avgHR && <Stat label="Avg HR" value={strengthSummaryStats.avgHR} unit="bpm" />}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {strengthSummarySessions.slice(0, 10).map((s) => (
+                <div key={s.id} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${COLORS.line}` }}>
+                  <div style={{ color: COLORS.ink, fontSize: 13 }}>{fmtShort(s.date)}{s.notes ? ` — ${s.notes}` : ""}</div>
+                  <div style={{ color: COLORS.inkSoft, fontSize: 12.5, fontFamily: "IBM Plex Mono, monospace" }}>
+                    {s.durationMin || 0} min{s.avgHR ? ` · ${s.avgHR} bpm` : ""}{s.calories ? ` · ${s.calories} cal` : ""}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
         )}
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          {Object.entries(strengthByExercise).map(([exercise, entries]) => {
-            const weights = entries.map((e) => Number(e.weight) || 0);
-            const maxWeight = Math.max(...weights, 0);
-            const first = weights[0] || 0;
-            const last = weights[weights.length - 1] || 0;
-            const delta = last - first;
-            return (
-              <div key={exercise} style={{ borderBottom: `1px solid ${COLORS.line}`, paddingBottom: 14 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                  <div style={{ color: COLORS.paper, fontSize: 14, fontWeight: 600 }}>{exercise}</div>
-                  <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 12, color: COLORS.amber }}>
-                    {maxWeight > 0 ? `PR ${maxWeight} lb` : `${entries.length} sessions`}
-                  </div>
-                </div>
-                {maxWeight > 0 && entries.length > 1 && (
-                  <div style={{ height: 90, marginTop: 6 }}>
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={entries.map((e) => ({ date: fmtShort(e.date), weight: Number(e.weight) || 0 }))}>
-                        <XAxis dataKey="date" stroke={COLORS.inkSoft} fontSize={10} />
-                        <YAxis hide domain={["dataMin - 5", "dataMax + 5"]} />
-                        <Tooltip contentStyle={{ background: COLORS.surface, border: `1px solid ${COLORS.line}`, fontSize: 11 }} labelStyle={{ color: COLORS.paper }} />
-                        <Line type="monotone" dataKey="weight" stroke={COLORS.amber} strokeWidth={2} dot={{ r: 2 }} />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
-                )}
-                <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 4 }}>
-                  {entries.length} session{entries.length !== 1 ? "s" : ""} logged{delta !== 0 ? ` · ${delta > 0 ? "+" : ""}${delta} lb since first log` : ""}
-                </div>
-              </div>
-            );
-          })}
-        </div>
       </Card>
     </div>
   );

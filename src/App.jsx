@@ -379,6 +379,31 @@ function buildPlan(raceDateStr, planStartDateStr, reducedFreq) {
   return { raceDate: raceDateStr, startDate: fmtDate(planStart), weeks };
 }
 
+// Works out the calorie target, activity estimate, deficit, and prescribed
+// session for ANY date — not just today — so both the Dashboard (today) and
+// the Nutrition tab (any day you're looking back at) can share one source
+// of truth instead of duplicating this math.
+function computeDayEnergy(dateStr, profile, plan, runs) {
+  const week =
+    plan.weeks.find((w) => {
+      const start = new Date(w.start + "T00:00:00");
+      const end = new Date(start);
+      end.setDate(end.getDate() + 7);
+      const d = new Date(dateStr + "T00:00:00");
+      return d >= start && d < end;
+    }) || plan.weeks[plan.weeks.length - 1];
+  const prescription = week.days.find((d) => d.date === dateStr) || null;
+  const isHardDay = !!prescription && /Long Run|Back-to-Back/.test(prescription.type);
+  const run = runs.find((r) => r.date === dateStr);
+  const activityKcal = run ? Math.round(Number(run.durationMin || 0) * 11) : 0;
+  const rawDeficit = profile.weightLossMode && !isHardDay ? Number(profile.deficitKcal || 0) : 0;
+  const preDeficitTarget = Number(profile.baseTDEE || 0);
+  const safetyFloor = Math.max(1200, Number(profile.baseTDEE || 0) * 0.75);
+  const targetKcal = Math.round(Math.max(preDeficitTarget - rawDeficit, safetyFloor));
+  const appliedDeficit = preDeficitTarget - targetKcal;
+  return { targetKcal, activityKcal, appliedDeficit, isHardDay, prescription, phase: week.phase };
+}
+
 // ---------- elevation profile (signature element) ----------
 function ElevationProfile({ plan }) {
   const w = 720,
@@ -583,6 +608,30 @@ function Button({ children, onClick, variant = "primary", style }) {
   );
 }
 
+// Shared day-picker used by Training Log and Nutrition — lets you page
+// back/forward a day at a time, jump via the date input, or snap to today.
+function DateNav({ date, setDate }) {
+  const shift = (delta) => {
+    const d = new Date(date + "T00:00:00");
+    d.setDate(d.getDate() + delta);
+    setDate(fmtDate(d));
+  };
+  const isToday = date === todayStr();
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      <Button variant="ghost" onClick={() => shift(-1)} style={{ padding: "8px 12px" }}>‹</Button>
+      <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ maxWidth: 160 }} />
+      <Button variant="ghost" onClick={() => shift(1)} style={{ padding: "8px 12px" }}>›</Button>
+      {!isToday && (
+        <Button variant="ghost" onClick={() => setDate(todayStr())}>Today</Button>
+      )}
+      <div style={{ color: COLORS.inkSoft, fontSize: 12.5, marginLeft: 4 }}>
+        {isToday ? "Today" : fmtShort(date)}
+      </div>
+    </div>
+  );
+}
+
 // ---------- main app ----------
 export default function UltraTrainingApp() {
   const [ready, setReady] = useState(false);
@@ -656,14 +705,8 @@ export default function UltraTrainingApp() {
   const todaysMeals = meals[todayStr()] || [];
   const todaysCalories = todaysMeals.reduce((s, m) => s + Number(m.cal || 0), 0);
   const todaysRun = runs.find((r) => r.date === todayStr());
-  const activityKcal = todaysRun ? Math.round(Number(todaysRun.durationMin || 0) * 11) : 0; // rough ultramarathon-effort estimate
-  const todaysPrescription = currentWeek.days.find((d) => d.date === todayStr());
-  const isHardDay = !!todaysPrescription && /Long Run|Back-to-Back/.test(todaysPrescription.type);
-  const rawDeficit = profile.weightLossMode && !isHardDay ? Number(profile.deficitKcal || 0) : 0;
-  const preDeficitTarget = Number(profile.baseTDEE || 0);
-  const safetyFloor = Math.max(1200, Number(profile.baseTDEE || 0) * 0.75);
-  const targetKcal = Math.round(Math.max(preDeficitTarget - rawDeficit, safetyFloor));
-  const appliedDeficit = preDeficitTarget - targetKcal;
+  const todayEnergy = useMemo(() => computeDayEnergy(todayStr(), profile, plan, runs), [profile, plan, runs]);
+  const { targetKcal, activityKcal } = todayEnergy;
 
   const thisWeekMiles = useMemo(() => {
     const wkStart = new Date(currentWeek.start + "T00:00:00");
@@ -775,13 +818,8 @@ export default function UltraTrainingApp() {
             savedMealSets={savedMealSets}
             setSavedMealSets={setSavedMealSets}
             profile={profile}
-            todaysCalories={todaysCalories}
-            targetKcal={targetKcal}
-            activityKcal={activityKcal}
-            appliedDeficit={appliedDeficit}
-            isHardDay={isHardDay}
-            todaysPrescription={todaysPrescription}
-            currentPhase={currentWeek.phase}
+            plan={plan}
+            runs={runs}
           />
         )}
         {tab === "settings" && (
@@ -932,23 +970,53 @@ function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalor
 }
 
 function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, currentPhase }) {
-  const [form, setForm] = useState({ date: todayStr(), type: "Easy", distance: "", durationMin: "", elevation: "", avgHR: "", notes: "" });
-  const [sForm, setSForm] = useState({ date: todayStr(), exercise: "", sets: "", reps: "", weight: "", notes: "" });
+  const [viewDate, setViewDate] = useState(todayStr());
+  const [form, setForm] = useState({ date: viewDate, type: "Easy", distance: "", durationMin: "", elevation: "", avgHR: "", notes: "" });
+  const [sForm, setSForm] = useState({ date: viewDate, exercise: "", sets: "", reps: "", weight: "", notes: "" });
+  const [editRunId, setEditRunId] = useState(null);
+  const [editRunForm, setEditRunForm] = useState(null);
+  const [editStrengthId, setEditStrengthId] = useState(null);
+  const [editStrengthForm, setEditStrengthForm] = useState(null);
+
+  // Keep the add-forms' date in sync with whichever day you're viewing —
+  // still overridable by hand if you want to log for a different day.
+  useEffect(() => {
+    setForm((f) => ({ ...f, date: viewDate }));
+    setSForm((f) => ({ ...f, date: viewDate }));
+  }, [viewDate]);
 
   const addRun = () => {
     if (!form.distance || !form.durationMin) return;
     setRuns([{ id: uid(), ...form }, ...runs]);
-    setForm({ date: todayStr(), type: "Easy", distance: "", durationMin: "", elevation: "", avgHR: "", notes: "" });
+    setForm({ date: viewDate, type: "Easy", distance: "", durationMin: "", elevation: "", avgHR: "", notes: "" });
   };
   const removeRun = (id) => setRuns(runs.filter((r) => r.id !== id));
+  const startEditRun = (r) => {
+    setEditRunId(r.id);
+    setEditRunForm({ ...r });
+  };
+  const saveEditRun = () => {
+    setRuns(runs.map((r) => (r.id === editRunId ? { ...editRunForm } : r)));
+    setEditRunId(null);
+    setEditRunForm(null);
+  };
 
   const addStrength = () => {
     const exercise = sForm.exercise === "__custom" ? sForm.customName : sForm.exercise;
     if (!exercise) return;
     setStrengthLogs([{ id: uid(), ...sForm, exercise }, ...strengthLogs]);
-    setSForm({ date: todayStr(), exercise: "", sets: "", reps: "", weight: "", notes: "" });
+    setSForm({ date: viewDate, exercise: "", sets: "", reps: "", weight: "", notes: "" });
   };
   const removeStrength = (id) => setStrengthLogs(strengthLogs.filter((s) => s.id !== id));
+  const startEditStrength = (s) => {
+    setEditStrengthId(s.id);
+    setEditStrengthForm({ ...s });
+  };
+  const saveEditStrength = () => {
+    setStrengthLogs(strengthLogs.map((s) => (s.id === editStrengthId ? { ...editStrengthForm } : s)));
+    setEditStrengthId(null);
+    setEditStrengthForm(null);
+  };
 
   const pace = (r) => {
     const d = Number(r.distance),
@@ -962,11 +1030,20 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, currentPhas
 
   const phaseKey = strengthKeyForPhase(currentPhase);
   const exerciseOptions = STRENGTH_LIBRARY[phaseKey]?.exercises.map((e) => e.name) || [];
+  const runTypeOptions = ["Easy", "Long Run", "Tempo", "Hill/Vert", "Back-to-Back", "Race Sim"];
+
+  const dayRuns = runs.filter((r) => r.date === viewDate);
+  const dayStrength = strengthLogs.filter((s) => s.date === viewDate);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
       <Card>
-        <Eyebrow>Log a run</Eyebrow>
+        <Eyebrow>Viewing</Eyebrow>
+        <DateNav date={viewDate} setDate={setViewDate} />
+      </Card>
+
+      <Card>
+        <Eyebrow>Log a run — {fmtShort(viewDate)}</Eyebrow>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px,1fr))", gap: 10 }}>
           <Input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} />
           <select
@@ -974,7 +1051,7 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, currentPhas
             onChange={(e) => setForm({ ...form, type: e.target.value })}
             style={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "8px 10px", color: COLORS.ink }}
           >
-            {["Easy", "Long Run", "Tempo", "Hill/Vert", "Back-to-Back", "Race Sim"].map((t) => (
+            {runTypeOptions.map((t) => (
               <option key={t}>{t}</option>
             ))}
           </select>
@@ -988,7 +1065,7 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, currentPhas
       </Card>
 
       <Card>
-        <Eyebrow>Log strength training</Eyebrow>
+        <Eyebrow>Log strength training — {fmtShort(viewDate)}</Eyebrow>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px,1fr))", gap: 10 }}>
           <Input type="date" value={sForm.date} onChange={(e) => setSForm({ ...sForm, date: e.target.value })} />
           <select
@@ -1021,42 +1098,91 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, currentPhas
       </Card>
 
       <Card>
-        <Eyebrow>Run history</Eyebrow>
-        {runs.length === 0 && <div style={{ color: COLORS.inkSoft, fontSize: 14 }}>No runs logged yet.</div>}
+        <Eyebrow>Runs — {fmtShort(viewDate)}</Eyebrow>
+        {dayRuns.length === 0 && <div style={{ color: COLORS.inkSoft, fontSize: 14 }}>No runs logged for this day.</div>}
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {runs.map((r) => (
-            <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${COLORS.line}` }}>
-              <div>
-                <div style={{ color: COLORS.paper, fontSize: 14, fontWeight: 600 }}>{r.type} · {r.date}</div>
-                <div style={{ color: COLORS.inkSoft, fontSize: 12 }}>
-                  {r.distance || 0} mi · {r.durationMin || 0} min · {pace(r)}
-                  {Number(r.elevation) > 0 ? ` · ${r.elevation} ft gain` : ""}
-                  {r.avgHR ? ` · ${r.avgHR} bpm` : ""}
+          {dayRuns.map((r) =>
+            editRunId === r.id ? (
+              <div key={r.id} style={{ padding: "10px 0", borderBottom: `1px solid ${COLORS.line}` }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px,1fr))", gap: 8 }}>
+                  <Input type="date" value={editRunForm.date} onChange={(e) => setEditRunForm({ ...editRunForm, date: e.target.value })} />
+                  <select
+                    value={editRunForm.type}
+                    onChange={(e) => setEditRunForm({ ...editRunForm, type: e.target.value })}
+                    style={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "8px 10px", color: COLORS.ink }}
+                  >
+                    {runTypeOptions.map((t) => (
+                      <option key={t}>{t}</option>
+                    ))}
+                  </select>
+                  <Input placeholder="Distance (mi)" type="number" value={editRunForm.distance} onChange={(e) => setEditRunForm({ ...editRunForm, distance: e.target.value })} />
+                  <Input placeholder="Duration (min)" type="number" value={editRunForm.durationMin} onChange={(e) => setEditRunForm({ ...editRunForm, durationMin: e.target.value })} />
+                  <Input placeholder="Elevation (ft)" type="number" value={editRunForm.elevation} onChange={(e) => setEditRunForm({ ...editRunForm, elevation: e.target.value })} />
+                  <Input placeholder="Avg HR" type="number" value={editRunForm.avgHR} onChange={(e) => setEditRunForm({ ...editRunForm, avgHR: e.target.value })} />
                 </div>
-                {r.notes && <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 2 }}>{r.notes}</div>}
+                <Input placeholder="Notes" value={editRunForm.notes} onChange={(e) => setEditRunForm({ ...editRunForm, notes: e.target.value })} style={{ marginTop: 8 }} />
+                <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                  <Button onClick={saveEditRun}>Save</Button>
+                  <Button variant="ghost" onClick={() => setEditRunId(null)}>Cancel</Button>
+                </div>
               </div>
-              <Button variant="danger" onClick={() => removeRun(r.id)}>Remove</Button>
-            </div>
-          ))}
+            ) : (
+              <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${COLORS.line}` }}>
+                <div>
+                  <div style={{ color: COLORS.paper, fontSize: 14, fontWeight: 600 }}>{r.type}</div>
+                  <div style={{ color: COLORS.inkSoft, fontSize: 12 }}>
+                    {r.distance || 0} mi · {r.durationMin || 0} min · {pace(r)}
+                    {Number(r.elevation) > 0 ? ` · ${r.elevation} ft gain` : ""}
+                    {r.avgHR ? ` · ${r.avgHR} bpm` : ""}
+                  </div>
+                  {r.notes && <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 2 }}>{r.notes}</div>}
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <Button variant="ghost" onClick={() => startEditRun(r)}>Edit</Button>
+                  <Button variant="danger" onClick={() => removeRun(r.id)}>Remove</Button>
+                </div>
+              </div>
+            )
+          )}
         </div>
       </Card>
 
       <Card>
-        <Eyebrow>Strength history</Eyebrow>
-        {strengthLogs.length === 0 && <div style={{ color: COLORS.inkSoft, fontSize: 14 }}>No strength sessions logged yet.</div>}
+        <Eyebrow>Strength — {fmtShort(viewDate)}</Eyebrow>
+        {dayStrength.length === 0 && <div style={{ color: COLORS.inkSoft, fontSize: 14 }}>No strength sessions logged for this day.</div>}
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {strengthLogs.map((s) => (
-            <div key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${COLORS.line}` }}>
-              <div>
-                <div style={{ color: COLORS.paper, fontSize: 14, fontWeight: 600 }}>{s.exercise} · {s.date}</div>
-                <div style={{ color: COLORS.inkSoft, fontSize: 12 }}>
-                  {s.sets || 0} sets x {s.reps || 0} reps{s.weight ? ` · ${s.weight} lb` : ""}
+          {dayStrength.map((s) =>
+            editStrengthId === s.id ? (
+              <div key={s.id} style={{ padding: "10px 0", borderBottom: `1px solid ${COLORS.line}` }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px,1fr))", gap: 8 }}>
+                  <Input type="date" value={editStrengthForm.date} onChange={(e) => setEditStrengthForm({ ...editStrengthForm, date: e.target.value })} />
+                  <Input placeholder="Exercise" value={editStrengthForm.exercise} onChange={(e) => setEditStrengthForm({ ...editStrengthForm, exercise: e.target.value })} />
+                  <Input placeholder="Sets" type="number" value={editStrengthForm.sets} onChange={(e) => setEditStrengthForm({ ...editStrengthForm, sets: e.target.value })} />
+                  <Input placeholder="Reps" type="number" value={editStrengthForm.reps} onChange={(e) => setEditStrengthForm({ ...editStrengthForm, reps: e.target.value })} />
+                  <Input placeholder="Weight (lb)" type="number" value={editStrengthForm.weight} onChange={(e) => setEditStrengthForm({ ...editStrengthForm, weight: e.target.value })} />
                 </div>
-                {s.notes && <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 2 }}>{s.notes}</div>}
+                <Input placeholder="Notes" value={editStrengthForm.notes} onChange={(e) => setEditStrengthForm({ ...editStrengthForm, notes: e.target.value })} style={{ marginTop: 8 }} />
+                <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                  <Button onClick={saveEditStrength}>Save</Button>
+                  <Button variant="ghost" onClick={() => setEditStrengthId(null)}>Cancel</Button>
+                </div>
               </div>
-              <Button variant="danger" onClick={() => removeStrength(s.id)}>Remove</Button>
-            </div>
-          ))}
+            ) : (
+              <div key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${COLORS.line}` }}>
+                <div>
+                  <div style={{ color: COLORS.paper, fontSize: 14, fontWeight: 600 }}>{s.exercise}</div>
+                  <div style={{ color: COLORS.inkSoft, fontSize: 12 }}>
+                    {s.sets || 0} sets x {s.reps || 0} reps{s.weight ? ` · ${s.weight} lb` : ""}
+                  </div>
+                  {s.notes && <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 2 }}>{s.notes}</div>}
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <Button variant="ghost" onClick={() => startEditStrength(s)}>Edit</Button>
+                  <Button variant="danger" onClick={() => removeStrength(s.id)}>Remove</Button>
+                </div>
+              </div>
+            )
+          )}
         </div>
       </Card>
     </div>
@@ -1499,34 +1625,43 @@ function Nutrition({
   savedMealSets,
   setSavedMealSets,
   profile,
-  todaysCalories,
-  targetKcal,
-  activityKcal,
-  appliedDeficit,
-  isHardDay,
-  todaysPrescription,
-  currentPhase,
+  plan,
+  runs,
 }) {
+  const [viewDate, setViewDate] = useState(todayStr());
   const [form, setForm] = useState({ name: "", cal: "", protein: "", carbs: "", fat: "" });
   const [showCustom, setShowCustom] = useState(false);
   const [savedQuery, setSavedQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState("Breakfast");
   const [savingSetCategory, setSavingSetCategory] = useState(null);
   const [setNameDraft, setSetNameDraft] = useState("");
-  const today = todayStr();
-  const list = meals[today] || [];
+  const [editMealId, setEditMealId] = useState(null);
+  const [editMealForm, setEditMealForm] = useState(null);
+  const list = meals[viewDate] || [];
+
+  const energy = useMemo(() => computeDayEnergy(viewDate, profile, plan, runs), [viewDate, profile, plan, runs]);
+  const { targetKcal, activityKcal, appliedDeficit, isHardDay, prescription, phase } = energy;
 
   const addFromSearch = (entry) => {
-    setMeals({ ...meals, [today]: [{ id: uid(), ...entry, category: activeCategory }, ...list] });
+    setMeals({ ...meals, [viewDate]: [{ id: uid(), ...entry, category: activeCategory }, ...list] });
   };
 
   const addMeal = () => {
     if (!form.name || !form.cal) return;
-    const updated = { ...meals, [today]: [{ id: uid(), ...form, category: activeCategory }, ...list] };
+    const updated = { ...meals, [viewDate]: [{ id: uid(), ...form, category: activeCategory }, ...list] };
     setMeals(updated);
     setForm({ name: "", cal: "", protein: "", carbs: "", fat: "" });
   };
-  const removeMeal = (id) => setMeals({ ...meals, [today]: list.filter((m) => m.id !== id) });
+  const removeMeal = (id) => setMeals({ ...meals, [viewDate]: list.filter((m) => m.id !== id) });
+  const startEditMeal = (m) => {
+    setEditMealId(m.id);
+    setEditMealForm({ ...m });
+  };
+  const saveEditMeal = () => {
+    setMeals({ ...meals, [viewDate]: list.map((m) => (m.id === editMealId ? { ...editMealForm } : m)) });
+    setEditMealId(null);
+    setEditMealForm(null);
+  };
 
   const saveAsMeal = (m) => {
     const alreadySaved = savedMeals.some((s) => s.name === m.name && s.cal === m.cal);
@@ -1535,12 +1670,12 @@ function Nutrition({
   };
   const removeSavedMeal = (id) => setSavedMeals(savedMeals.filter((s) => s.id !== id));
   const addSavedMealToToday = (m) => {
-    setMeals({ ...meals, [today]: [{ id: uid(), name: m.name, cal: m.cal, protein: m.protein, carbs: m.carbs, fat: m.fat, category: activeCategory }, ...list] });
+    setMeals({ ...meals, [viewDate]: [{ id: uid(), name: m.name, cal: m.cal, protein: m.protein, carbs: m.carbs, fat: m.fat, category: activeCategory }, ...list] });
   };
 
   const startSaveSet = (category, items) => {
     setSavingSetCategory(category);
-    setSetNameDraft(`${category} — ${fmtShort(today)}`);
+    setSetNameDraft(`${category} — ${fmtShort(viewDate)}`);
   };
   const confirmSaveSet = (items) => {
     if (!setNameDraft.trim() || items.length === 0) return;
@@ -1552,14 +1687,12 @@ function Nutrition({
   const removeMealSet = (id) => setSavedMealSets(savedMealSets.filter((s) => s.id !== id));
   const applyMealSet = (set) => {
     const newItems = set.items.map((it) => ({ id: uid(), ...it, category: activeCategory }));
-    setMeals({ ...meals, [today]: [...newItems, ...list] });
+    setMeals({ ...meals, [viewDate]: [...newItems, ...list] });
   };
 
   const filteredSavedMeals = savedQuery.trim()
     ? savedMeals.filter((m) => m.name.toLowerCase().includes(savedQuery.trim().toLowerCase()))
     : savedMeals;
-
-  const remaining = targetKcal - todaysCalories;
 
   const dayTotals = list.reduce(
     (acc, m) => ({
@@ -1570,25 +1703,31 @@ function Nutrition({
     }),
     { cal: 0, protein: 0, carbs: 0, fat: 0 }
   );
+  const remaining = targetKcal - dayTotals.cal;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      <Card>
+        <Eyebrow>Viewing</Eyebrow>
+        <DateNav date={viewDate} setDate={setViewDate} />
+      </Card>
+
       {profile.weightLossMode && (
         <Card style={{ borderColor: COLORS.amber + "55" }}>
           <Eyebrow>Weight-loss mode</Eyebrow>
           <div style={{ color: COLORS.inkSoft, fontSize: 13, lineHeight: 1.6 }}>
             {isHardDay
-              ? "Today's a long run / back-to-back day — the deficit is paused so you're fully fueled for it."
+              ? "This is a long run / back-to-back day — the deficit is paused so you're fully fueled for it."
               : appliedDeficit > 0
-              ? `A ${Math.round(appliedDeficit)} kcal deficit is applied to today's target.`
-              : "Deficit isn't being applied today (check your base TDEE isn't already near the safety floor)."}
+              ? `A ${Math.round(appliedDeficit)} kcal deficit is applied to this day's target.`
+              : "Deficit isn't being applied on this day (check your base TDEE isn't already near the safety floor)."}
           </div>
         </Card>
       )}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px,1fr))", gap: 14 }}>
         <Card><Stat label="Base TDEE" value={profile.baseTDEE} unit="kcal" /></Card>
-        <Card><Stat label="Activity today" value={activityKcal} unit="kcal" /></Card>
-        <Card><Stat label="Target today" value={targetKcal} unit="kcal" /></Card>
+        <Card><Stat label="Activity this day" value={activityKcal} unit="kcal" /></Card>
+        <Card><Stat label="Target this day" value={targetKcal} unit="kcal" /></Card>
         <Card style={{ borderColor: remaining < 0 ? COLORS.rust + "77" : COLORS.line }}>
           <Stat label={remaining < 0 ? "Over target" : "Remaining"} value={Math.abs(remaining)} unit="kcal" />
         </Card>
@@ -1617,7 +1756,7 @@ function Nutrition({
           ))}
         </div>
         <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 10 }}>
-          Everything you add below — search, saved meals, or custom entry — gets logged under <b style={{ color: COLORS.ink }}>{activeCategory}</b>.
+          Everything you add below — search, saved meals, or custom entry — gets logged under <b style={{ color: COLORS.ink }}>{activeCategory}</b> for <b style={{ color: COLORS.ink }}>{fmtShort(viewDate)}</b>.
         </div>
       </Card>
 
@@ -1658,7 +1797,7 @@ function Nutrition({
         <Eyebrow>Saved meal combos · {savedMealSets.length}</Eyebrow>
         {savedMealSets.length === 0 ? (
           <div style={{ color: COLORS.inkSoft, fontSize: 13 }}>
-            No combos saved yet — below, each meal section has a "Save this meal" button once it has items in it. Save a whole plate (e.g. everything in today's Lunch) and re-add all of it at once to any meal, any day.
+            No combos saved yet — below, each meal section has a "Save this meal" button once it has items in it. Save a whole plate and re-add all of it at once to any meal, any day.
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -1736,27 +1875,41 @@ function Nutrition({
               )}
             </div>
             <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 2, marginBottom: 10, lineHeight: 1.5 }}>
-              {mealGuidance(category, todaysPrescription, currentPhase)}
+              {mealGuidance(category, prescription, phase)}
             </div>
             {items.length === 0 ? (
               <div style={{ color: COLORS.inkSoft, fontSize: 13 }}>Nothing logged yet.</div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {items.map((m) => {
-                  const alreadySaved = savedMeals.some((s) => s.name === m.name && s.cal === m.cal);
-                  return (
+                {items.map((m) =>
+                  editMealId === m.id ? (
+                    <div key={m.id} style={{ padding: "8px 0", borderBottom: `1px solid ${COLORS.line}` }}>
+                      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr", gap: 8 }}>
+                        <Input value={editMealForm.name} onChange={(e) => setEditMealForm({ ...editMealForm, name: e.target.value })} />
+                        <Input placeholder="Cal" type="number" value={editMealForm.cal} onChange={(e) => setEditMealForm({ ...editMealForm, cal: e.target.value })} />
+                        <Input placeholder="P" type="number" value={editMealForm.protein} onChange={(e) => setEditMealForm({ ...editMealForm, protein: e.target.value })} />
+                        <Input placeholder="C" type="number" value={editMealForm.carbs} onChange={(e) => setEditMealForm({ ...editMealForm, carbs: e.target.value })} />
+                        <Input placeholder="F" type="number" value={editMealForm.fat} onChange={(e) => setEditMealForm({ ...editMealForm, fat: e.target.value })} />
+                      </div>
+                      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                        <Button onClick={saveEditMeal}>Save</Button>
+                        <Button variant="ghost" onClick={() => setEditMealId(null)}>Cancel</Button>
+                      </div>
+                    </div>
+                  ) : (
                     <div key={m.id} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: `1px solid ${COLORS.line}` }}>
                       <div>
                         <div style={{ color: COLORS.paper, fontSize: 14, fontWeight: 600 }}>{m.name}</div>
                         <div style={{ color: COLORS.inkSoft, fontSize: 12 }}>{m.cal} kcal · P{m.protein || 0} C{m.carbs || 0} F{m.fat || 0}</div>
                       </div>
                       <div style={{ display: "flex", gap: 8 }}>
-                        <Button variant="ghost" onClick={() => saveAsMeal(m)}>{alreadySaved ? "Saved" : "Save"}</Button>
+                        <Button variant="ghost" onClick={() => startEditMeal(m)}>Edit</Button>
+                        <Button variant="ghost" onClick={() => saveAsMeal(m)}>{savedMeals.some((s) => s.name === m.name && s.cal === m.cal) ? "Saved" : "Save"}</Button>
                         <Button variant="danger" onClick={() => removeMeal(m.id)}>Remove</Button>
                       </div>
                     </div>
-                  );
-                })}
+                  )
+                )}
                 {items.length > 1 && savingSetCategory !== category && (
                   <Button variant="ghost" onClick={() => startSaveSet(category, items)} style={{ alignSelf: "flex-start", marginTop: 4 }}>
                     Save this meal as a combo
@@ -1776,7 +1929,7 @@ function Nutrition({
       })}
 
       <Card style={{ borderColor: COLORS.amber + "55" }}>
-        <Eyebrow>Day total</Eyebrow>
+        <Eyebrow>Day total — {fmtShort(viewDate)}</Eyebrow>
         <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 18, color: COLORS.paper, fontWeight: 600 }}>
           {dayTotals.cal} <span style={{ fontSize: 13, color: COLORS.inkSoft, fontWeight: 400 }}>/ {targetKcal} kcal</span>
         </div>

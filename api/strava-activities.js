@@ -37,7 +37,7 @@ export default async function handler(req, res) {
     }
 
     const params = new URLSearchParams();
-    params.set("per_page", "60");
+    params.set("per_page", "100");
     if (after) params.set("after", String(after));
     const actRes = await fetch(`https://www.strava.com/api/v3/athlete/activities?${params.toString()}`, {
       headers: { Authorization: `Bearer ${token}` },

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
-import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from "recharts";
+import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from "recharts";
 
 /* ---------- design tokens ----------
   Palette: deep trail forest + topo paper + trail-marker amber
@@ -402,6 +402,22 @@ function computeDayEnergy(dateStr, profile, plan, runs) {
   const targetKcal = Math.round(Math.max(preDeficitTarget - rawDeficit, safetyFloor));
   const appliedDeficit = preDeficitTarget - targetKcal;
   return { targetKcal, activityKcal, appliedDeficit, isHardDay, prescription, phase: week.phase };
+}
+
+// Suggested macro split for a given day's calorie target. Protein anchors to
+// bodyweight when known (0.8 g/lb is a solid endurance+strength number,
+// comfortably covers muscle maintenance even in a deficit). Fat holds a
+// smaller share on hard/long-run days, leaving more of the budget for carbs
+// to fuel and refill glycogen; the deficit itself is already baked into
+// targetKcal by the time it gets here.
+function calcMacroTargets(targetKcal, weightLb, isHardDay) {
+  const proteinG = weightLb ? Math.round(Number(weightLb) * 0.8) : Math.round((targetKcal * 0.25) / 4);
+  const fatPct = isHardDay ? 0.2 : 0.25;
+  const proteinKcal = proteinG * 4;
+  const fatG = Math.round((targetKcal * fatPct) / 9);
+  const fatKcal = fatG * 9;
+  const carbsG = Math.max(Math.round((targetKcal - proteinKcal - fatKcal) / 4), 0);
+  return { proteinG, carbsG, fatG };
 }
 
 // ---------- elevation profile (signature element) ----------
@@ -1706,6 +1722,7 @@ function Nutrition({
     { cal: 0, protein: 0, carbs: 0, fat: 0 }
   );
   const remaining = targetKcal - dayTotals.cal;
+  const macroTargets = calcMacroTargets(targetKcal, profile.weightLb, isHardDay);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
@@ -1734,6 +1751,70 @@ function Nutrition({
           <Stat label={remaining < 0 ? "Over target" : "Remaining"} value={Math.abs(remaining)} unit="kcal" />
         </Card>
       </div>
+
+      <Card>
+        <Eyebrow>Macro targets — {fmtShort(viewDate)}</Eyebrow>
+        <div style={{ color: COLORS.inkSoft, fontSize: 12, marginBottom: 14, lineHeight: 1.5 }}>
+          Protein is set from your bodyweight (0.8 g/lb) so it holds steady whether or not you're in a deficit. Fat and carbs split the rest of the target — carbs get a bigger share on long run / back-to-back days for fueling.
+        </div>
+        <div style={{ display: "flex", gap: 24, flexWrap: "wrap", alignItems: "center" }}>
+          <div style={{ flex: "1 1 240px", display: "flex", flexDirection: "column", gap: 14 }}>
+            {[
+              { label: "Protein", have: dayTotals.protein, target: macroTargets.proteinG, color: COLORS.rust },
+              { label: "Carbs", have: dayTotals.carbs, target: macroTargets.carbsG, color: COLORS.amber },
+              { label: "Fat", have: dayTotals.fat, target: macroTargets.fatG, color: COLORS.moss },
+            ].map((m) => {
+              const pct = m.target > 0 ? Math.min(100, Math.round((m.have / m.target) * 100)) : 0;
+              return (
+                <div key={m.label}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 4 }}>
+                    <span style={{ color: COLORS.ink, fontWeight: 600 }}>{m.label}</span>
+                    <span style={{ color: COLORS.inkSoft, fontFamily: "IBM Plex Mono, monospace" }}>
+                      {Math.round(m.have)}g / {m.target}g
+                    </span>
+                  </div>
+                  <div style={{ height: 8, borderRadius: 4, background: COLORS.bg, overflow: "hidden" }}>
+                    <div style={{ width: `${pct}%`, height: "100%", background: m.color, borderRadius: 4 }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ width: 140, height: 140, flexShrink: 0 }}>
+            {dayTotals.cal > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={[
+                      { name: "Protein", value: Math.max(dayTotals.protein * 4, 0) },
+                      { name: "Carbs", value: Math.max(dayTotals.carbs * 4, 0) },
+                      { name: "Fat", value: Math.max(dayTotals.fat * 9, 0) },
+                    ]}
+                    dataKey="value"
+                    nameKey="name"
+                    innerRadius={35}
+                    outerRadius={60}
+                    stroke="none"
+                  >
+                    <Cell fill={COLORS.rust} />
+                    <Cell fill={COLORS.amber} />
+                    <Cell fill={COLORS.moss} />
+                  </Pie>
+                  <Tooltip
+                    contentStyle={{ background: COLORS.surface, border: `1px solid ${COLORS.line}`, fontSize: 12 }}
+                    labelStyle={{ color: COLORS.paper }}
+                    formatter={(value, name) => [`${Math.round(value)} kcal`, name]}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+            ) : (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: COLORS.inkSoft, fontSize: 12, textAlign: "center" }}>
+                Log something to see today's split
+              </div>
+            )}
+          </div>
+        </div>
+      </Card>
 
       <Card>
         <Eyebrow>Log to</Eyebrow>

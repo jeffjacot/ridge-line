@@ -721,7 +721,6 @@ export default function UltraTrainingApp() {
   const [runs, setRuns] = useState([]);
   const [strengthLogs, setStrengthLogs] = useState([]);
   const [meals, setMeals] = useState({}); // { 'YYYY-MM-DD': [ {id,name,cal,protein,carbs,fat} ] }
-  const [savedMeals, setSavedMeals] = useState([]); // [ {id,name,cal,protein,carbs,fat} ]
   const [savedMealSets, setSavedMealSets] = useState([]); // [ {id,name,items:[{name,cal,protein,carbs,fat}]} ]
 
   useEffect(() => {
@@ -732,7 +731,6 @@ export default function UltraTrainingApp() {
       const rn = await loadJSON("runs", []);
       const sl = await loadJSON("strength-logs", []);
       const ml = await loadJSON("meals", {});
-      const sm = await loadJSON("saved-meals", []);
       const sms = await loadJSON("saved-meal-sets", []);
       setRaceDate(rd);
       setPlanStartDate(psd);
@@ -740,7 +738,6 @@ export default function UltraTrainingApp() {
       setRuns(rn);
       setStrengthLogs(sl);
       setMeals(ml);
-      setSavedMeals(sm);
       setSavedMealSets(sms);
       setReady(true);
     })();
@@ -764,9 +761,6 @@ export default function UltraTrainingApp() {
   useEffect(() => {
     if (ready) saveJSON("meals", meals);
   }, [meals, ready]);
-  useEffect(() => {
-    if (ready) saveJSON("saved-meals", savedMeals);
-  }, [savedMeals, ready]);
   useEffect(() => {
     if (ready) saveJSON("saved-meal-sets", savedMealSets);
   }, [savedMealSets, ready]);
@@ -895,8 +889,6 @@ export default function UltraTrainingApp() {
           <Nutrition
             meals={meals}
             setMeals={setMeals}
-            savedMeals={savedMeals}
-            setSavedMeals={setSavedMeals}
             savedMealSets={savedMealSets}
             setSavedMealSets={setSavedMealSets}
             profile={profile}
@@ -1796,8 +1788,6 @@ function mealGuidance(category, prescription, phase) {
 function Nutrition({
   meals,
   setMeals,
-  savedMeals,
-  setSavedMeals,
   savedMealSets,
   setSavedMealSets,
   profile,
@@ -1807,7 +1797,6 @@ function Nutrition({
   const [viewDate, setViewDate] = useState(todayStr());
   const [form, setForm] = useState({ name: "", cal: "", protein: "", carbs: "", fat: "" });
   const [showCustom, setShowCustom] = useState(false);
-  const [savedQuery, setSavedQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState("Breakfast");
   const [savingSetCategory, setSavingSetCategory] = useState(null);
   const [setNameDraft, setSetNameDraft] = useState("");
@@ -1839,16 +1828,6 @@ function Nutrition({
     setEditMealForm(null);
   };
 
-  const saveAsMeal = (m) => {
-    const alreadySaved = savedMeals.some((s) => s.name === m.name && s.cal === m.cal);
-    if (alreadySaved) return;
-    setSavedMeals([{ id: uid(), name: m.name, cal: m.cal, protein: m.protein, carbs: m.carbs, fat: m.fat }, ...savedMeals]);
-  };
-  const removeSavedMeal = (id) => setSavedMeals(savedMeals.filter((s) => s.id !== id));
-  const addSavedMealToToday = (m) => {
-    setMeals({ ...meals, [viewDate]: [{ id: uid(), name: m.name, cal: m.cal, protein: m.protein, carbs: m.carbs, fat: m.fat, category: activeCategory }, ...list] });
-  };
-
   const startSaveSet = (category, items) => {
     setSavingSetCategory(category);
     setSetNameDraft(`${category} — ${fmtShort(viewDate)}`);
@@ -1865,10 +1844,6 @@ function Nutrition({
     const newItems = set.items.map((it) => ({ id: uid(), ...it, category: activeCategory }));
     setMeals({ ...meals, [viewDate]: [...newItems, ...list] });
   };
-
-  const filteredSavedMeals = savedQuery.trim()
-    ? savedMeals.filter((m) => m.name.toLowerCase().includes(savedQuery.trim().toLowerCase()))
-    : savedMeals;
 
   const dayTotals = list.reduce(
     (acc, m) => ({
@@ -1951,41 +1926,8 @@ function Nutrition({
           ))}
         </div>
         <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 10 }}>
-          Everything you add below — search, saved meals, or custom entry — gets logged under <b style={{ color: COLORS.ink }}>{activeCategory}</b> for <b style={{ color: COLORS.ink }}>{fmtShort(viewDate)}</b>.
+          Everything you add below — search, saved combos, or custom entry — gets logged under <b style={{ color: COLORS.ink }}>{activeCategory}</b> for <b style={{ color: COLORS.ink }}>{fmtShort(viewDate)}</b>.
         </div>
-      </Card>
-
-      <Card>
-        <Eyebrow>Saved meals · {savedMeals.length}</Eyebrow>
-        {savedMeals.length > 3 && (
-          <Input
-            placeholder="Search your saved meals…"
-            value={savedQuery}
-            onChange={(e) => setSavedQuery(e.target.value)}
-            style={{ marginBottom: 10 }}
-          />
-        )}
-        {savedMeals.length === 0 ? (
-          <div style={{ color: COLORS.inkSoft, fontSize: 13 }}>
-            Nothing saved yet — tap "Save" on any logged meal, and it'll show up here for one-tap re-adding on meal-prep days.
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {filteredSavedMeals.map((m) => (
-              <div key={m.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${COLORS.line}` }}>
-                <div>
-                  <div style={{ color: COLORS.paper, fontSize: 14, fontWeight: 600 }}>{m.name}</div>
-                  <div style={{ color: COLORS.inkSoft, fontSize: 12 }}>{m.cal} kcal · P{m.protein || 0} C{m.carbs || 0} F{m.fat || 0}</div>
-                </div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <Button onClick={() => addSavedMealToToday(m)}>Add to {activeCategory}</Button>
-                  <Button variant="danger" onClick={() => removeSavedMeal(m.id)}>Remove</Button>
-                </div>
-              </div>
-            ))}
-            {filteredSavedMeals.length === 0 && <div style={{ color: COLORS.inkSoft, fontSize: 13 }}>No matches.</div>}
-          </div>
-        )}
       </Card>
 
       <Card>
@@ -2099,7 +2041,6 @@ function Nutrition({
                       </div>
                       <div style={{ display: "flex", gap: 8 }}>
                         <Button variant="ghost" onClick={() => startEditMeal(m)}>Edit</Button>
-                        <Button variant="ghost" onClick={() => saveAsMeal(m)}>{savedMeals.some((s) => s.name === m.name && s.cal === m.cal) ? "Saved" : "Save"}</Button>
                         <Button variant="danger" onClick={() => removeMeal(m.id)}>Remove</Button>
                       </div>
                     </div>

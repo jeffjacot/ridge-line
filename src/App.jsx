@@ -815,9 +815,13 @@ export default function UltraTrainingApp() {
     if (!stravaAuth) return;
     setStravaSyncStatus("Syncing…");
     try {
-      const after = stravaAuth.lastSyncAt
-        ? Math.floor(new Date(stravaAuth.lastSyncAt).getTime() / 1000)
-        : Math.floor((Date.now() - 90 * 24 * 60 * 60 * 1000) / 1000); // first sync: last 90 days
+      // Always re-request a rolling window rather than "since last sync" —
+      // an incremental cutoff means anything that happened before your last
+      // sync can never be picked up later (e.g. if a filter changes, or an
+      // activity's type gets edited on Strava afterward). Re-fetching the
+      // last 45 days every time costs one extra API call, and stravaId
+      // de-duping below makes the overlap free — nothing gets duplicated.
+      const after = Math.floor((Date.now() - 45 * 24 * 60 * 60 * 1000) / 1000);
       const res = await fetch("/api/strava-activities", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

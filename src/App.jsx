@@ -835,12 +835,12 @@ export default function UltraTrainingApp() {
       }
       const existingIds = new Set(runs.map((r) => r.stravaId).filter(Boolean));
       const newRuns = (data.activities || [])
-        .filter((a) => a.type === "Run" && !existingIds.has(a.id))
+        .filter((a) => (a.type === "Run" || a.type === "Walk") && !existingIds.has(a.id))
         .map((a) => ({
           id: uid(),
           stravaId: a.id,
           date: (a.start_date_local || a.start_date || "").slice(0, 10),
-          type: "Easy",
+          type: a.type === "Walk" ? "Walk" : "Easy",
           distance: Math.round((a.distance / 1609.34) * 100) / 100,
           durationMin: Math.round(a.moving_time / 60),
           elevation: Math.round((a.total_elevation_gain || 0) * 3.28084),
@@ -850,7 +850,7 @@ export default function UltraTrainingApp() {
       if (newRuns.length > 0) setRuns([...newRuns, ...runs]);
       const updatedAuth = { ...stravaAuth, accessToken: data.access_token, refreshToken: data.refresh_token, expiresAt: data.expires_at, lastSyncAt: new Date().toISOString() };
       setStravaAuth(updatedAuth);
-      setStravaSyncStatus(newRuns.length > 0 ? `Synced ${newRuns.length} new run${newRuns.length !== 1 ? "s" : ""}.` : "Up to date — nothing new.");
+      setStravaSyncStatus(newRuns.length > 0 ? `Synced ${newRuns.length} new session${newRuns.length !== 1 ? "s" : ""}.` : "Up to date — nothing new.");
     } catch (e) {
       setStravaSyncStatus("Sync failed — check your connection and try again.");
     }

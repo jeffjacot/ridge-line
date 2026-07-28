@@ -841,10 +841,10 @@ export default function UltraTrainingApp() {
         </div>
 
         {/* tabs */}
-        <div style={{ display: "flex", gap: 4, marginTop: 22, borderBottom: `1px solid ${COLORS.line}` }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 22, paddingBottom: 14, borderBottom: `1px solid ${COLORS.line}` }}>
           {[
             ["dashboard", "Dashboard"],
-            ["log", "Training Log"],
+            ["log", "Log"],
             ["plan", "Plan"],
             ["strength", "Strength"],
             ["progress", "Progress"],
@@ -855,12 +855,15 @@ export default function UltraTrainingApp() {
               key={key}
               onClick={() => setTab(key)}
               style={{
-                padding: "10px 14px",
-                fontSize: 13,
+                padding: "8px 12px",
+                borderRadius: 20,
+                fontSize: 12.5,
                 fontWeight: 600,
                 cursor: "pointer",
-                color: tab === key ? COLORS.paper : COLORS.inkSoft,
-                borderBottom: tab === key ? `2px solid ${COLORS.amber}` : "2px solid transparent",
+                whiteSpace: "nowrap",
+                color: tab === key ? "#1B140A" : COLORS.inkSoft,
+                background: tab === key ? COLORS.amber : "transparent",
+                border: `1px solid ${tab === key ? COLORS.amber : COLORS.line}`,
               }}
             >
               {label}

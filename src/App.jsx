@@ -582,6 +582,69 @@ function Stat({ label, value, unit }) {
     </div>
   );
 }
+
+// All three macros as one circle — concentric rings (protein outer, carbs
+// middle, fat inner), each filling with its own color as you log food, plus
+// a shared center readout and a legend with exact grams underneath.
+function MacroRingsCombined({ macros, centerLabel, centerValue }) {
+  const bands = [
+    { outer: 96, inner: 80 }, // protein — outermost
+    { outer: 75, inner: 59 }, // carbs — middle
+    { outer: 54, inner: 38 }, // fat — innermost
+  ];
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 14 }}>
+      <div style={{ width: 220, height: 220, position: "relative" }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <PieChart>
+            {macros.map((m, i) => {
+              const filled = Math.min(m.have, m.target);
+              const remain = Math.max(m.target - m.have, 0);
+              const data = remain > 0 ? [{ v: filled }, { v: remain }] : [{ v: m.target || 1 }];
+              return (
+                <Pie
+                  key={m.label}
+                  data={data}
+                  dataKey="v"
+                  innerRadius={bands[i].inner}
+                  outerRadius={bands[i].outer}
+                  startAngle={90}
+                  endAngle={-270}
+                  stroke="none"
+                >
+                  <Cell fill={m.color} />
+                  {remain > 0 && <Cell fill={COLORS.line} />}
+                </Pie>
+              );
+            })}
+          </PieChart>
+        </ResponsiveContainer>
+        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column" }}>
+          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 20, fontWeight: 600, color: COLORS.paper }}>{centerValue}</div>
+          <div style={{ fontSize: 11, color: COLORS.inkSoft, marginTop: 2 }}>{centerLabel}</div>
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 20, flexWrap: "wrap", justifyContent: "center" }}>
+        {macros.map((m) => {
+          const over = Math.max(m.have - m.target, 0);
+          const pct = m.target > 0 ? Math.min(100, Math.round((m.have / m.target) * 100)) : 0;
+          return (
+            <div key={m.label} style={{ textAlign: "center" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "center" }}>
+                <div style={{ width: 8, height: 8, borderRadius: "50%", background: m.color }} />
+                <span style={{ fontSize: 12.5, fontWeight: 600, color: COLORS.ink }}>{m.label}</span>
+              </div>
+              <div style={{ fontSize: 11.5, color: COLORS.inkSoft, fontFamily: "IBM Plex Mono, monospace", marginTop: 2 }}>
+                {Math.round(m.have)}g / {m.target}g · {pct}%
+              </div>
+              {over > 0 && <div style={{ fontSize: 10.5, color: COLORS.rust }}>+{Math.round(over)}g over</div>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 function Input(props) {
   return (
     <input
@@ -654,7 +717,7 @@ export default function UltraTrainingApp() {
   const [tab, setTab] = useState("dashboard");
   const [raceDate, setRaceDate] = useState("2027-01-30");
   const [planStartDate, setPlanStartDate] = useState("2026-07-27");
-  const [profile, setProfile] = useState({ baseTDEE: 2400, weightLb: "", weightLossMode: false, deficitKcal: 400, reducedFrequency: false });
+  const [profile, setProfile] = useState({ baseTDEE: 2400, weightLb: "", weightLossMode: false, deficitKcal: 400, reducedFrequency: false, usdaApiKey: "" });
   const [runs, setRuns] = useState([]);
   const [strengthLogs, setStrengthLogs] = useState([]);
   const [meals, setMeals] = useState({}); // { 'YYYY-MM-DD': [ {id,name,cal,protein,carbs,fat} ] }
@@ -665,7 +728,7 @@ export default function UltraTrainingApp() {
     (async () => {
       const rd = await loadJSON("race-date", "2027-01-30");
       const psd = await loadJSON("plan-start-date", "2026-07-27");
-      const pr = await loadJSON("profile", { baseTDEE: 2400, weightLb: "", weightLossMode: false, deficitKcal: 400, reducedFrequency: false });
+      const pr = await loadJSON("profile", { baseTDEE: 2400, weightLb: "", weightLossMode: false, deficitKcal: 400, reducedFrequency: false, usdaApiKey: "" });
       const rn = await loadJSON("runs", []);
       const sl = await loadJSON("strength-logs", []);
       const ml = await loadJSON("meals", {});
@@ -1478,11 +1541,15 @@ function PlanView({ plan }) {
   );
 }
 
-function FoodSearch({ onAdd }) {
+function FoodSearch({ onAdd, usdaApiKey }) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(null);
   const [unit, setUnit] = useState("oz");
   const [amount, setAmount] = useState("");
+  const [usdaResults, setUsdaResults] = useState([]);
+  const [usdaLoading, setUsdaLoading] = useState(false);
+  const [usdaError, setUsdaError] = useState(null);
+  const [usdaSearchedFor, setUsdaSearchedFor] = useState(null);
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -1525,7 +1592,7 @@ function FoodSearch({ onAdd }) {
 
   const add = () => {
     if (!selected || !amount) return;
-    const label = `${amount} ${unit}${Number(amount) !== 1 ? (unit === "serving" ? "s" : "") : ""} ${selected.name}`;
+    const label = `${amount} ${unit}${Number(amount) !== 1 ? (unit === "serving" ? "s" : "") : ""} ${selected.name}${selected.isOnline ? " (USDA)" : ""}`;
     onAdd({
       name: label,
       cal: macros.cal,
@@ -1536,6 +1603,42 @@ function FoodSearch({ onAdd }) {
     setSelected(null);
     setAmount("");
     setQuery("");
+    setUsdaResults([]);
+    setUsdaSearchedFor(null);
+  };
+
+  const searchUsda = async () => {
+    const q = query.trim();
+    if (!q || !usdaApiKey) return;
+    setUsdaLoading(true);
+    setUsdaError(null);
+    try {
+      const url = `https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${encodeURIComponent(usdaApiKey)}&query=${encodeURIComponent(q)}&pageSize=8&dataType=Foundation,SR%20Legacy,Survey%20(FNDDS)`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`USDA API returned ${res.status}`);
+      const data = await res.json();
+      const parsed = (data.foods || []).map((item) => {
+        const get = (nameFrag) => {
+          const n = (item.foodNutrients || []).find((fn) => (fn.nutrientName || "").toLowerCase().includes(nameFrag));
+          return n ? Number(n.value) || 0 : 0;
+        };
+        return {
+          name: item.description,
+          cal: Math.round(get("energy")),
+          protein: Math.round(get("protein") * 10) / 10,
+          carbs: Math.round(get("carbohydrate") * 10) / 10,
+          fat: Math.round(get("total lipid") * 10) / 10,
+          isOnline: true,
+        };
+      }).filter((f) => f.cal > 0);
+      setUsdaResults(parsed);
+      setUsdaSearchedFor(q);
+      if (parsed.length === 0) setUsdaError("No results found — try a simpler or more generic term.");
+    } catch (e) {
+      setUsdaError("Couldn't reach the USDA database — check your API key in Settings, or try again.");
+    } finally {
+      setUsdaLoading(false);
+    }
   };
 
   return (
@@ -1547,6 +1650,9 @@ function FoodSearch({ onAdd }) {
         onChange={(e) => {
           setQuery(e.target.value);
           setSelected(null);
+          setUsdaResults([]);
+          setUsdaSearchedFor(null);
+          setUsdaError(null);
         }}
       />
       {results.length > 0 && (
@@ -1563,9 +1669,29 @@ function FoodSearch({ onAdd }) {
         </div>
       )}
 
+      {usdaResults.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ color: COLORS.inkSoft, fontSize: 11.5, marginBottom: 4 }}>From the USDA database:</div>
+          <div style={{ border: `1px solid ${COLORS.line}`, borderRadius: 6, overflow: "hidden" }}>
+            {usdaResults.map((f, i) => (
+              <div
+                key={i}
+                onClick={() => pick(f)}
+                style={{ padding: "9px 12px", cursor: "pointer", fontSize: 13.5, color: COLORS.ink, borderBottom: `1px solid ${COLORS.line}` }}
+              >
+                {f.name} <span style={{ color: COLORS.inkSoft, fontSize: 12 }}>· {f.cal} kcal / 100g</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {selected && (
         <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${COLORS.line}` }}>
-          <div style={{ color: COLORS.paper, fontSize: 15, fontWeight: 600, marginBottom: 10 }}>{selected.name}</div>
+          <div style={{ color: COLORS.paper, fontSize: 15, fontWeight: 600, marginBottom: 10 }}>
+            {selected.name}
+            {selected.isOnline && <span style={{ color: COLORS.amber, fontSize: 12, fontWeight: 400 }}> · USDA</span>}
+          </div>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <Input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} style={{ maxWidth: 90 }} />
             <select
@@ -1587,19 +1713,28 @@ function FoodSearch({ onAdd }) {
         </div>
       )}
 
-      {!selected && query.trim() && bestMatchScore < 60 && (
+      {!selected && query.trim() && bestMatchScore < 60 && usdaSearchedFor !== query.trim() && (
         <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${COLORS.line}` }}>
-          <div style={{ color: COLORS.inkSoft, fontSize: 12.5 }}>
+          <div style={{ color: COLORS.inkSoft, fontSize: 12.5, marginBottom: 10 }}>
             {results.length === 0
-              ? `Not in the local database. Use "+ Add a custom food" below to log it manually.`
-              : `Nothing above is an exact match — if none of these are right, use "+ Add a custom food" below.`}
+              ? "Not in the local database."
+              : "Nothing above is an exact match."}
+            {usdaApiKey
+              ? " Search the full USDA nutrition database instead, or use \"+ Add a custom food\" below."
+              : " Add a free USDA API key in Settings to search hundreds of thousands of foods, or use \"+ Add a custom food\" below."}
           </div>
+          {usdaApiKey && (
+            <Button onClick={searchUsda} variant="ghost">
+              {usdaLoading ? "Searching…" : `Search USDA database for "${query.trim()}"`}
+            </Button>
+          )}
+          {usdaError && <div style={{ color: COLORS.rust, fontSize: 12.5, marginTop: 8 }}>{usdaError}</div>}
         </div>
       )}
 
       {!selected && !query.trim() && (
         <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 10 }}>
-          {FOOD_DB.length} foods in the local database. Anything not found can be added manually with the custom entry below.
+          {FOOD_DB.length} foods in the local database, plus the full USDA database if you've added an API key in Settings. Anything not found can always be added manually with the custom entry below.
         </div>
       )}
     </Card>
@@ -1755,64 +1890,18 @@ function Nutrition({
       <Card>
         <Eyebrow>Macro targets — {fmtShort(viewDate)}</Eyebrow>
         <div style={{ color: COLORS.inkSoft, fontSize: 12, marginBottom: 14, lineHeight: 1.5 }}>
-          Protein is set from your bodyweight (0.8 g/lb) so it holds steady whether or not you're in a deficit. Fat and carbs split the rest of the target — carbs get a bigger share on long run / back-to-back days for fueling.
+          Protein is set from your bodyweight (0.8 g/lb) so it holds steady whether or not you're in a deficit. Fat and carbs split the rest of the target — carbs get a bigger share on long run / back-to-back days for fueling. Each ring fills up as you log food, from outside in: protein, carbs, fat.
         </div>
-        <div style={{ display: "flex", gap: 24, flexWrap: "wrap", alignItems: "center" }}>
-          <div style={{ flex: "1 1 240px", display: "flex", flexDirection: "column", gap: 14 }}>
-            {[
+        <div style={{ display: "flex", justifyContent: "center" }}>
+          <MacroRingsCombined
+            macros={[
               { label: "Protein", have: dayTotals.protein, target: macroTargets.proteinG, color: COLORS.rust },
               { label: "Carbs", have: dayTotals.carbs, target: macroTargets.carbsG, color: COLORS.amber },
               { label: "Fat", have: dayTotals.fat, target: macroTargets.fatG, color: COLORS.moss },
-            ].map((m) => {
-              const pct = m.target > 0 ? Math.min(100, Math.round((m.have / m.target) * 100)) : 0;
-              return (
-                <div key={m.label}>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 4 }}>
-                    <span style={{ color: COLORS.ink, fontWeight: 600 }}>{m.label}</span>
-                    <span style={{ color: COLORS.inkSoft, fontFamily: "IBM Plex Mono, monospace" }}>
-                      {Math.round(m.have)}g / {m.target}g
-                    </span>
-                  </div>
-                  <div style={{ height: 8, borderRadius: 4, background: COLORS.bg, overflow: "hidden" }}>
-                    <div style={{ width: `${pct}%`, height: "100%", background: m.color, borderRadius: 4 }} />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-          <div style={{ width: 140, height: 140, flexShrink: 0 }}>
-            {dayTotals.cal > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={[
-                      { name: "Protein", value: Math.max(dayTotals.protein * 4, 0) },
-                      { name: "Carbs", value: Math.max(dayTotals.carbs * 4, 0) },
-                      { name: "Fat", value: Math.max(dayTotals.fat * 9, 0) },
-                    ]}
-                    dataKey="value"
-                    nameKey="name"
-                    innerRadius={35}
-                    outerRadius={60}
-                    stroke="none"
-                  >
-                    <Cell fill={COLORS.rust} />
-                    <Cell fill={COLORS.amber} />
-                    <Cell fill={COLORS.moss} />
-                  </Pie>
-                  <Tooltip
-                    contentStyle={{ background: COLORS.surface, border: `1px solid ${COLORS.line}`, fontSize: 12 }}
-                    labelStyle={{ color: COLORS.paper }}
-                    formatter={(value, name) => [`${Math.round(value)} kcal`, name]}
-                  />
-                </PieChart>
-              </ResponsiveContainer>
-            ) : (
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: COLORS.inkSoft, fontSize: 12, textAlign: "center" }}>
-                Log something to see today's split
-              </div>
-            )}
-          </div>
+            ]}
+            centerValue={`${Math.round(dayTotals.cal)}`}
+            centerLabel={`of ${targetKcal} kcal`}
+          />
         </div>
       </Card>
 
@@ -1916,7 +2005,7 @@ function Nutrition({
         )}
       </Card>
 
-      <FoodSearch onAdd={addFromSearch} />
+      <FoodSearch onAdd={addFromSearch} usdaApiKey={profile.usdaApiKey} />
 
       {!showCustom && (
         <Button variant="ghost" onClick={() => setShowCustom(true)}>+ Add a custom food not in the database</Button>
@@ -2084,6 +2173,23 @@ function Settings({ raceDate, setRaceDate, planStartDate, setPlanStartDate, prof
         </div>
         <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 10 }}>
           Activity calories are estimated from logged run duration and shown for reference, but are not added to today's target — your target stays at your base TDEE (minus any deficit below) regardless of how much you ran. Don't know your TDEE precisely — a rough estimate is fine to start; it improves as your weight trend comes in.
+        </div>
+      </Card>
+      <Card>
+        <Eyebrow>Food search</Eyebrow>
+        <div style={{ maxWidth: 420 }}>
+          <label style={{ fontSize: 12, color: COLORS.inkSoft }}>USDA FoodData Central API key</label>
+          <Input
+            type="text"
+            placeholder="Paste your free API key here"
+            value={profile.usdaApiKey}
+            onChange={(e) => setProfile({ ...profile, usdaApiKey: e.target.value })}
+            style={{ marginTop: 4 }}
+          />
+        </div>
+        <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 10, lineHeight: 1.6 }}>
+          The built-in database has ~40 common foods. Adding a free USDA key unlocks searching their full nutrition database (hundreds of thousands of foods) right from the search box — no cost, no billing, just a personal rate limit. Get one instantly at{" "}
+          <span style={{ color: COLORS.amber }}>fdc.nal.usda.gov/api-key-signup</span> (just an email address, no credit card) and paste it above.
         </div>
       </Card>
       <Card>

@@ -1608,8 +1608,13 @@ function FoodSearch({ onAdd, usdaApiKey }) {
   };
 
   const searchUsda = async () => {
-    const q = query.trim();
-    if (!q || !usdaApiKey) return;
+    const rawQ = query.trim();
+    if (!rawQ || !usdaApiKey) return;
+    // "/" (and a couple of other search-operator characters) can make the
+    // USDA gateway reject the request outright before it even runs a
+    // search — e.g. "80/20 ground beef" fails where "80 20 ground beef"
+    // works fine. Swap them for spaces rather than let that surprise you.
+    const q = rawQ.replace(/[\/\\]/g, " ").replace(/\s+/g, " ").trim();
     setUsdaLoading(true);
     setUsdaError(null);
     try {
@@ -1647,7 +1652,7 @@ function FoodSearch({ onAdd, usdaApiKey }) {
           };
         }).filter((f) => f.cal > 0);
       setUsdaResults(parsed);
-      setUsdaSearchedFor(q);
+      setUsdaSearchedFor(rawQ);
       if (parsed.length === 0) setUsdaError("No results found — try a simpler or more generic term.");
     } catch (e) {
       setUsdaError(`Couldn't reach the USDA database: ${e.message || "network error"}`);

@@ -1030,7 +1030,7 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, currentPhas
 
   const phaseKey = strengthKeyForPhase(currentPhase);
   const exerciseOptions = STRENGTH_LIBRARY[phaseKey]?.exercises.map((e) => e.name) || [];
-  const runTypeOptions = ["Easy", "Long Run", "Tempo", "Hill/Vert", "Back-to-Back", "Race Sim"];
+  const runTypeOptions = ["Easy", "Long Run", "Tempo", "Hill/Vert", "Back-to-Back", "Race Sim", "Walk"];
 
   const dayRuns = runs.filter((r) => r.date === viewDate);
   const dayStrength = strengthLogs.filter((s) => s.date === viewDate);
@@ -1206,8 +1206,10 @@ function Progress({ plan, currentWeek, runs, strengthLogs }) {
           const d = new Date(r.date + "T00:00:00");
           return d >= wkStart && d < wkEnd;
         });
+        // Miles include walks (they count toward weekly volume); elevation
+        // excludes walks — that chart is about trained vert, not strolling.
         const actualMiles = weekRuns.reduce((s, r) => s + Number(r.distance || 0), 0);
-        const actualVert = weekRuns.reduce((s, r) => s + Number(r.elevation || 0), 0);
+        const actualVert = weekRuns.filter((r) => r.type !== "Walk").reduce((s, r) => s + Number(r.elevation || 0), 0);
         return { week: `Wk ${w.week}`, planned: w.totalMiles, actual: Math.round(actualMiles * 10) / 10, vert: Math.round(actualVert) };
       });
   }, [plan, currentWeek, runs]);
@@ -1222,7 +1224,7 @@ function Progress({ plan, currentWeek, runs, strengthLogs }) {
 
   const hrPaceTrend = useMemo(() => {
     return runs
-      .filter((r) => Number(r.distance) > 0 && Number(r.durationMin) > 0 && Number(r.avgHR) > 0)
+      .filter((r) => r.type !== "Walk" && Number(r.distance) > 0 && Number(r.durationMin) > 0 && Number(r.avgHR) > 0)
       .slice()
       .sort((a, b) => new Date(a.date) - new Date(b.date))
       .map((r) => ({

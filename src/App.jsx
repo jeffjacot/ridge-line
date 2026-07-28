@@ -1616,10 +1616,7 @@ function FoodSearch({ onAdd, usdaApiKey }) {
       const params = new URLSearchParams();
       params.set("api_key", usdaApiKey.trim());
       params.set("query", q);
-      params.set("pageSize", "8");
-      // Array-typed params go as repeated keys, not a comma-joined string —
-      // a single "dataType=A,B,C" value is rejected by the API.
-      ["Foundation", "SR Legacy", "Survey (FNDDS)"].forEach((t) => params.append("dataType", t));
+      params.set("pageSize", "15");
       const url = `https://api.nal.usda.gov/fdc/v1/foods/search?${params.toString()}`;
       const res = await fetch(url);
       const bodyText = await res.text();
@@ -1632,20 +1629,23 @@ function FoodSearch({ onAdd, usdaApiKey }) {
         throw new Error(`HTTP ${res.status} — ${detail}`);
       }
       const data = JSON.parse(bodyText);
-      const parsed = (data.foods || []).map((item) => {
-        const get = (nameFrag) => {
-          const n = (item.foodNutrients || []).find((fn) => (fn.nutrientName || "").toLowerCase().includes(nameFrag));
-          return n ? Number(n.value) || 0 : 0;
-        };
-        return {
-          name: item.description,
-          cal: Math.round(get("energy")),
-          protein: Math.round(get("protein") * 10) / 10,
-          carbs: Math.round(get("carbohydrate") * 10) / 10,
-          fat: Math.round(get("total lipid") * 10) / 10,
-          isOnline: true,
-        };
-      }).filter((f) => f.cal > 0);
+      const parsed = (data.foods || [])
+        .filter((item) => item.dataType !== "Branded") // branded items report per-serving, not per-100g — skip rather than risk wrong math
+        .slice(0, 8)
+        .map((item) => {
+          const get = (nameFrag) => {
+            const n = (item.foodNutrients || []).find((fn) => (fn.nutrientName || "").toLowerCase().includes(nameFrag));
+            return n ? Number(n.value) || 0 : 0;
+          };
+          return {
+            name: item.description,
+            cal: Math.round(get("energy")),
+            protein: Math.round(get("protein") * 10) / 10,
+            carbs: Math.round(get("carbohydrate") * 10) / 10,
+            fat: Math.round(get("total lipid") * 10) / 10,
+            isOnline: true,
+          };
+        }).filter((f) => f.cal > 0);
       setUsdaResults(parsed);
       setUsdaSearchedFor(q);
       if (parsed.length === 0) setUsdaError("No results found — try a simpler or more generic term.");

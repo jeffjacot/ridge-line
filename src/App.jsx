@@ -1613,10 +1613,25 @@ function FoodSearch({ onAdd, usdaApiKey }) {
     setUsdaLoading(true);
     setUsdaError(null);
     try {
-      const url = `https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${encodeURIComponent(usdaApiKey)}&query=${encodeURIComponent(q)}&pageSize=8&dataType=Foundation,SR%20Legacy,Survey%20(FNDDS)`;
+      const params = new URLSearchParams();
+      params.set("api_key", usdaApiKey.trim());
+      params.set("query", q);
+      params.set("pageSize", "8");
+      // Array-typed params go as repeated keys, not a comma-joined string —
+      // a single "dataType=A,B,C" value is rejected by the API.
+      ["Foundation", "SR Legacy", "Survey (FNDDS)"].forEach((t) => params.append("dataType", t));
+      const url = `https://api.nal.usda.gov/fdc/v1/foods/search?${params.toString()}`;
       const res = await fetch(url);
-      if (!res.ok) throw new Error(`USDA API returned ${res.status}`);
-      const data = await res.json();
+      const bodyText = await res.text();
+      if (!res.ok) {
+        let detail = bodyText.slice(0, 200);
+        try {
+          const j = JSON.parse(bodyText);
+          detail = j.error?.message || j.message || detail;
+        } catch {}
+        throw new Error(`HTTP ${res.status} — ${detail}`);
+      }
+      const data = JSON.parse(bodyText);
       const parsed = (data.foods || []).map((item) => {
         const get = (nameFrag) => {
           const n = (item.foodNutrients || []).find((fn) => (fn.nutrientName || "").toLowerCase().includes(nameFrag));
@@ -1635,7 +1650,7 @@ function FoodSearch({ onAdd, usdaApiKey }) {
       setUsdaSearchedFor(q);
       if (parsed.length === 0) setUsdaError("No results found — try a simpler or more generic term.");
     } catch (e) {
-      setUsdaError("Couldn't reach the USDA database — check your API key in Settings, or try again.");
+      setUsdaError(`Couldn't reach the USDA database: ${e.message || "network error"}`);
     } finally {
       setUsdaLoading(false);
     }

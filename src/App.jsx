@@ -26,7 +26,12 @@ const COLORS = {
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 const STRAVA_CLIENT_ID = "267417";
-const fmtDate = (d) => d.toISOString().slice(0, 10);
+const fmtDate = (d) => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+};
 const todayStr = () => fmtDate(new Date());
 const daysBetween = (a, b) => Math.round((b - a) / 86400000);
 
@@ -1343,7 +1348,7 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, stravaAuth,
           <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${COLORS.line}`, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <Button variant="ghost" onClick={onSyncStrava}>Sync Strava</Button>
             <div style={{ color: COLORS.inkSoft, fontSize: 12 }}>
-              {stravaSyncStatus || (stravaAuth.lastSyncAt ? `Last synced ${fmtShort(stravaAuth.lastSyncAt.slice(0, 10))}` : "Not synced yet")}
+              {stravaSyncStatus || (stravaAuth.lastSyncAt ? `Last synced ${fmtShort(fmtDate(new Date(stravaAuth.lastSyncAt)))}` : "Not synced yet")}
             </div>
           </div>
         )}

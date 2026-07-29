@@ -410,6 +410,23 @@ function computeDayEnergy(dateStr, profile, plan, runs) {
   return { targetKcal, activityKcal, appliedDeficit, isHardDay, prescription, phase: week.phase };
 }
 
+// Latest value for a body-comp field (weightLb / bodyFatPct / muscleMassLb),
+// plus how it's changed vs the reading from roughly a week earlier — used
+// to show "gaining/losing" direction, not just a raw current number.
+function latestWithTrend(weightLogs, field) {
+  const withField = (weightLogs || [])
+    .filter((w) => w[field] != null)
+    .slice()
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
+  if (withField.length === 0) return null;
+  const latest = withField[0];
+  const cutoff = new Date(latest.date + "T00:00:00");
+  cutoff.setDate(cutoff.getDate() - 6);
+  const older = withField.find((w) => new Date(w.date + "T00:00:00") <= cutoff);
+  const delta = older ? Math.round((latest[field] - older[field]) * 10) / 10 : null;
+  return { value: latest[field], delta, date: latest.date };
+}
+
 // Suggested macro split for a given day's calorie target. Protein anchors to
 // bodyweight when known (0.8 g/lb is a solid endurance+strength number,
 // comfortably covers muscle maintenance even in a deficit). Fat holds a
@@ -1090,6 +1107,8 @@ export default function UltraTrainingApp() {
             todaysCalories={todaysCalories}
             targetKcal={targetKcal}
             todaysRun={todaysRun}
+            runs={runs}
+            weightLogs={weightLogs}
             reducedFrequency={profile.reducedFrequency}
           />
         )}
@@ -1212,9 +1231,21 @@ function Strength({ currentPhase }) {
   );
 }
 
-function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalories, targetKcal, todaysRun, reducedFrequency }) {
+function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalories, targetKcal, todaysRun, runs, weightLogs, reducedFrequency }) {
   const today = todayStr();
   const todaysPrescription = currentWeek.days.find((d) => d.date === today);
+  const todaysMilesRun = useMemo(() => runs.filter((r) => r.date === today).reduce((s, r) => s + Number(r.distance || 0), 0), [runs, today]);
+  const remainingCal = targetKcal - todaysCalories;
+
+  const weight = useMemo(() => latestWithTrend(weightLogs, "weightLb"), [weightLogs]);
+  const bodyFat = useMemo(() => latestWithTrend(weightLogs, "bodyFatPct"), [weightLogs]);
+  const muscle = useMemo(() => latestWithTrend(weightLogs, "muscleMassLb"), [weightLogs]);
+
+  const trendArrow = (delta, invert) => {
+    if (delta == null || Math.abs(delta) < 0.3) return { symbol: "→", color: COLORS.inkSoft, label: "steady" };
+    const up = delta > 0;
+    return { symbol: up ? "↑" : "↓", color: COLORS.ink, label: `${up ? "+" : ""}${delta}` };
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
@@ -1225,55 +1256,112 @@ function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalor
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 14 }}>
         <Card><Stat label="Current phase" value={currentWeek.phase} /></Card>
+
+        <Card style={{ borderColor: todaysPrescription && todaysPrescription.type !== "Rest" ? COLORS.amber + "66" : COLORS.line }}>
+          <Eyebrow>{todaysPrescription ? todaysPrescription.type : "Today"}</Eyebrow>
+          {todaysPrescription && todaysPrescription.type === "Rest" && todaysMilesRun === 0 ? (
+            <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 20, color: COLORS.inkSoft, fontWeight: 600 }}>Rest day</div>
+          ) : (
+            <div style={{ display: "flex", gap: 18 }}>
+              <div>
+                <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 22, color: COLORS.paper, fontWeight: 600 }}>
+                  {todaysMilesRun.toFixed(1)}
+                </div>
+                <div style={{ fontSize: 11, color: COLORS.inkSoft }}>completed</div>
+              </div>
+              <div>
+                <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 22, color: COLORS.inkSoft, fontWeight: 600 }}>
+                  {todaysPrescription ? todaysPrescription.miles : 0}
+                </div>
+                <div style={{ fontSize: 11, color: COLORS.inkSoft }}>prescribed (mi)</div>
+              </div>
+            </div>
+          )}
+          {todaysPrescription?.strength && <div style={{ color: COLORS.amber, fontSize: 12, marginTop: 4, fontWeight: 600 }}>+ Strength session</div>}
+        </Card>
+
         <Card><Stat label="This week's mileage so far" value={thisWeekMiles.toFixed(1)} unit={`/ ${currentWeek.totalMiles} mi`} /></Card>
         <Card><Stat label="Elevation gain this week" value={Math.round(thisWeekVert)} unit="ft" /></Card>
-        <Card><Stat label="Prescribed long run" value={currentWeek.longRun} unit="mi (Wed)" /></Card>
-        <Card><Stat label="Calories today" value={todaysCalories} unit={`/ ${targetKcal}`} /></Card>
+        <Card style={{ borderColor: remainingCal < 0 ? COLORS.rust + "77" : COLORS.line }}>
+          <Stat label={remainingCal < 0 ? "Over target" : "Remaining today"} value={Math.abs(Math.round(remainingCal))} unit="kcal" />
+        </Card>
       </div>
 
-      {todaysPrescription && (
-        <Card style={{ borderColor: todaysPrescription.type === "Rest" ? COLORS.line : COLORS.amber + "66" }}>
-          <Eyebrow>Today's session — {todaysPrescription.dayName}</Eyebrow>
-          <div style={{ color: COLORS.paper, fontSize: 20, fontWeight: 600, fontFamily: "Oswald, sans-serif" }}>
-            {todaysPrescription.type === "Rest" ? "Rest day" : `${todaysPrescription.type} — ${todaysPrescription.miles} mi`}
+      <Card>
+        <Eyebrow>Body composition</Eyebrow>
+        {!weight && !bodyFat && !muscle ? (
+          <div style={{ color: COLORS.inkSoft, fontSize: 14 }}>No Withings data yet — connect and sync in Settings and the Progress tab.</div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px,1fr))", gap: 14 }}>
+            {weight && (
+              <div>
+                <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 22, color: COLORS.paper, fontWeight: 600 }}>
+                  {weight.value.toFixed(1)}
+                  <span style={{ fontSize: 13, color: COLORS.inkSoft, marginLeft: 4 }}>lb</span>
+                </div>
+                <div style={{ fontSize: 12, marginTop: 2, color: trendArrow(weight.delta).color }}>
+                  {trendArrow(weight.delta).symbol} {trendArrow(weight.delta).label} lb / 7d
+                </div>
+                <div style={{ fontSize: 11, color: COLORS.inkSoft, marginTop: 2 }}>Weight</div>
+              </div>
+            )}
+            {bodyFat && (
+              <div>
+                <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 22, color: COLORS.paper, fontWeight: 600 }}>
+                  {bodyFat.value.toFixed(1)}
+                  <span style={{ fontSize: 13, color: COLORS.inkSoft, marginLeft: 4 }}>%</span>
+                </div>
+                <div style={{ fontSize: 12, marginTop: 2, color: trendArrow(bodyFat.delta).color }}>
+                  {trendArrow(bodyFat.delta).symbol} {trendArrow(bodyFat.delta).label}% / 7d
+                </div>
+                <div style={{ fontSize: 11, color: COLORS.inkSoft, marginTop: 2 }}>Body fat</div>
+              </div>
+            )}
+            {muscle && (
+              <div>
+                <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 22, color: COLORS.paper, fontWeight: 600 }}>
+                  {muscle.value.toFixed(1)}
+                  <span style={{ fontSize: 13, color: COLORS.inkSoft, marginLeft: 4 }}>lb</span>
+                </div>
+                <div style={{ fontSize: 12, marginTop: 2, color: trendArrow(muscle.delta).color }}>
+                  {trendArrow(muscle.delta).symbol} {trendArrow(muscle.delta).label} lb / 7d
+                </div>
+                <div style={{ fontSize: 11, color: COLORS.inkSoft, marginTop: 2 }}>Muscle mass</div>
+              </div>
+            )}
           </div>
-          {todaysPrescription.strength && (
-            <div style={{ color: COLORS.amber, fontSize: 13, marginTop: 4, fontWeight: 600 }}>+ Strength session</div>
-          )}
-        </Card>
-      )}
+        )}
+      </Card>
 
       <Card>
         <Eyebrow>This week — {currentWeek.phase} phase</Eyebrow>
-        <div style={{ color: COLORS.inkSoft, fontSize: 13, marginBottom: 14 }}>{currentWeek.focus}</div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(92px, 1fr))", gap: 8 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(64px, 1fr))", gap: 5 }}>
           {currentWeek.days.map((d) => {
             const isToday = d.date === today;
             const isRest = d.type === "Rest";
             return (
               <div
                 key={d.date}
+                title={d.type}
                 style={{
                   background: isToday ? COLORS.raised : "transparent",
                   border: `1px solid ${isToday ? COLORS.amber : COLORS.line}`,
-                  borderRadius: 8,
-                  padding: "10px 8px",
+                  borderRadius: 6,
+                  padding: "5px 3px",
                   textAlign: "center",
                 }}
               >
-                <div style={{ fontSize: 11, color: COLORS.inkSoft, textTransform: "uppercase", letterSpacing: "0.05em" }}>{d.short}</div>
-                <div style={{ fontSize: 10, color: COLORS.inkSoft, opacity: 0.8 }}>{fmtShort(d.date)}</div>
-                <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 18, fontWeight: 600, color: isRest ? COLORS.inkSoft : COLORS.paper, marginTop: 4 }}>
-                  {isRest ? "—" : `${d.miles}mi`}
+                <div style={{ fontSize: 9.5, color: COLORS.inkSoft, textTransform: "uppercase", letterSpacing: "0.03em" }}>{d.short}</div>
+                <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 14, fontWeight: 600, color: isRest ? COLORS.inkSoft : COLORS.paper, marginTop: 2 }}>
+                  {isRest ? "—" : `${d.miles}`}
                 </div>
-                <div style={{ fontSize: 10, color: COLORS.inkSoft, marginTop: 2, lineHeight: 1.3 }}>{d.type}</div>
-                {d.strength && <div style={{ fontSize: 10, color: COLORS.amber, marginTop: 2 }}>+ Strength</div>}
+                {d.strength && <div style={{ fontSize: 9, color: COLORS.amber, marginTop: 1 }}>+S</div>}
               </div>
             );
           })}
         </div>
-        <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 12 }}>
-          Mobility work daily, 10 min post-run · Sunday fully off{currentWeek.isCutback ? " · Cutback week — trust the lighter load" : ""}{reducedFrequency && (currentWeek.phase === "Foundation" || currentWeek.phase === "Build I") ? " · 5-day mode active (Thu is rest)" : ""}
+        <div style={{ color: COLORS.inkSoft, fontSize: 11, marginTop: 8 }}>
+          {currentWeek.isCutback ? "Cutback week. " : ""}{reducedFrequency && (currentWeek.phase === "Foundation" || currentWeek.phase === "Build I") ? "5-day mode active." : ""}
         </div>
       </Card>
 

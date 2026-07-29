@@ -1573,12 +1573,12 @@ function Progress({ plan, currentWeek, runs, strengthLogs, weightLogs, withingsA
         {weeklyData.length === 0 ? (
           <div style={{ color: COLORS.inkSoft, fontSize: 14 }}>Nothing to show yet — log a few runs first.</div>
         ) : (
-          <div style={{ height: 220 }}>
+          <div style={{ height: 240 }}>
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={weeklyData} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+              <LineChart data={weeklyData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                 <CartesianGrid stroke={COLORS.line} strokeDasharray="3 3" />
                 <XAxis dataKey="week" stroke={COLORS.inkSoft} fontSize={11} />
-                <YAxis stroke={COLORS.inkSoft} fontSize={11} />
+                <YAxis stroke={COLORS.inkSoft} fontSize={11} width={34} />
                 <Tooltip contentStyle={{ background: COLORS.surface, border: `1px solid ${COLORS.line}`, fontSize: 12 }} labelStyle={{ color: COLORS.paper }} />
                 <Legend wrapperStyle={{ fontSize: 12 }} />
                 <Line type="monotone" dataKey="planned" name="Planned" stroke={COLORS.inkSoft} strokeDasharray="4 4" dot={false} />
@@ -1594,12 +1594,12 @@ function Progress({ plan, currentWeek, runs, strengthLogs, weightLogs, withingsA
         {weeklyData.length === 0 ? (
           <div style={{ color: COLORS.inkSoft, fontSize: 14 }}>No elevation logged yet.</div>
         ) : (
-          <div style={{ height: 200 }}>
+          <div style={{ height: 220 }}>
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={weeklyData} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+              <BarChart data={weeklyData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                 <CartesianGrid stroke={COLORS.line} strokeDasharray="3 3" />
                 <XAxis dataKey="week" stroke={COLORS.inkSoft} fontSize={11} />
-                <YAxis stroke={COLORS.inkSoft} fontSize={11} />
+                <YAxis stroke={COLORS.inkSoft} fontSize={11} width={40} />
                 <Tooltip contentStyle={{ background: COLORS.surface, border: `1px solid ${COLORS.line}`, fontSize: 12 }} labelStyle={{ color: COLORS.paper }} />
                 <Bar dataKey="vert" name="Elevation (ft)" fill={COLORS.moss} radius={[3, 3, 0, 0]} />
               </BarChart>
@@ -1613,12 +1613,12 @@ function Progress({ plan, currentWeek, runs, strengthLogs, weightLogs, withingsA
         {longRunTrend.length === 0 ? (
           <div style={{ color: COLORS.inkSoft, fontSize: 14 }}>Log a "Long Run" or "Back-to-Back" session to see this trend.</div>
         ) : (
-          <div style={{ height: 200 }}>
+          <div style={{ height: 220 }}>
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={longRunTrend} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+              <LineChart data={longRunTrend} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                 <CartesianGrid stroke={COLORS.line} strokeDasharray="3 3" />
                 <XAxis dataKey="date" stroke={COLORS.inkSoft} fontSize={11} />
-                <YAxis stroke={COLORS.inkSoft} fontSize={11} />
+                <YAxis stroke={COLORS.inkSoft} fontSize={11} width={34} />
                 <Tooltip contentStyle={{ background: COLORS.surface, border: `1px solid ${COLORS.line}`, fontSize: 12 }} labelStyle={{ color: COLORS.paper }} />
                 <Line type="monotone" dataKey="miles" name="Miles" stroke={COLORS.rust} strokeWidth={2} dot={{ r: 3 }} />
               </LineChart>
@@ -1633,9 +1633,9 @@ function Progress({ plan, currentWeek, runs, strengthLogs, weightLogs, withingsA
           <div style={{ color: COLORS.inkSoft, fontSize: 14 }}>Log at least two runs with avg HR to see this trend.</div>
         ) : (
           <>
-            <div style={{ height: 220 }}>
+            <div style={{ height: 240 }}>
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={hrPaceTrend} margin={{ top: 8, right: 8, left: -10, bottom: 0 }}>
+                <LineChart data={hrPaceTrend} margin={{ top: 8, right: 4, left: 0, bottom: 0 }}>
                   <CartesianGrid stroke={COLORS.line} strokeDasharray="3 3" />
                   <XAxis dataKey="date" stroke={COLORS.inkSoft} fontSize={11} />
                   <YAxis
@@ -1644,9 +1644,9 @@ function Progress({ plan, currentWeek, runs, strengthLogs, weightLogs, withingsA
                     fontSize={11}
                     reversed
                     tickFormatter={(v) => fmtPace(v)}
-                    width={54}
+                    width={50}
                   />
-                  <YAxis yAxisId="hr" orientation="right" stroke={COLORS.rust} fontSize={11} width={40} />
+                  <YAxis yAxisId="hr" orientation="right" stroke={COLORS.rust} fontSize={11} width={38} />
                   <Tooltip
                     contentStyle={{ background: COLORS.surface, border: `1px solid ${COLORS.line}`, fontSize: 12 }}
                     labelStyle={{ color: COLORS.paper }}
@@ -1680,13 +1680,13 @@ function Progress({ plan, currentWeek, runs, strengthLogs, weightLogs, withingsA
         ) : weightTrend.length === 0 ? (
           <div style={{ color: COLORS.inkSoft, fontSize: 14, marginTop: 6 }}>No readings yet — tap "Sync Withings" above.</div>
         ) : (
-          <div style={{ height: 220, marginTop: 10 }}>
+          <div style={{ height: 250, marginTop: 10 }}>
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={weightTrend} margin={{ top: 8, right: 8, left: -10, bottom: 0 }}>
+              <LineChart data={weightTrend} margin={{ top: 8, right: 4, left: 0, bottom: 0 }}>
                 <CartesianGrid stroke={COLORS.line} strokeDasharray="3 3" />
                 <XAxis dataKey="date" stroke={COLORS.inkSoft} fontSize={11} />
-                <YAxis yAxisId="weight" stroke={COLORS.amber} fontSize={11} width={40} domain={["dataMin - 3", "dataMax + 3"]} />
-                <YAxis yAxisId="pct" orientation="right" stroke={COLORS.moss} fontSize={11} width={36} domain={["dataMin - 2", "dataMax + 2"]} />
+                <YAxis yAxisId="weight" stroke={COLORS.amber} fontSize={11} width={38} domain={["dataMin - 3", "dataMax + 3"]} />
+                <YAxis yAxisId="pct" orientation="right" stroke={COLORS.moss} fontSize={11} width={34} domain={["dataMin - 2", "dataMax + 2"]} />
                 <Tooltip contentStyle={{ background: COLORS.surface, border: `1px solid ${COLORS.line}`, fontSize: 12 }} labelStyle={{ color: COLORS.paper }} />
                 <Legend wrapperStyle={{ fontSize: 12 }} />
                 <Line yAxisId="weight" type="monotone" dataKey="weight" name="Weight (lb)" stroke={COLORS.amber} strokeWidth={2} dot={{ r: 3 }} connectNulls />

@@ -1833,14 +1833,27 @@ function FoodSearch({ onAdd, usdaApiKey }) {
 
   const add = () => {
     if (!selected || !amount) return;
-    const label = `${amount} ${unit}${Number(amount) !== 1 ? (unit === "serving" ? "s" : "") : ""} ${selected.name}${selected.isOnline ? " (USDA)" : ""}`;
-    onAdd({
+    const baseName = `${selected.name}${selected.isOnline ? " (USDA)" : ""}`;
+    const label = `${amount} ${unit}${Number(amount) !== 1 ? (unit === "serving" ? "s" : "") : ""} ${baseName}`;
+    const entry = {
       name: label,
+      baseName,
+      amount,
+      unit,
       cal: macros.cal,
       protein: macros.protein,
       carbs: macros.carbs,
       fat: macros.fat,
-    });
+      // Per-100g rate + any food-specific unit conversions, carried forward
+      // so the portion can be rescaled later — directly, or after copying.
+      calPerG: selected.cal / 100,
+      proteinPerG: selected.protein / 100,
+      carbsPerG: selected.carbs / 100,
+      fatPerG: selected.fat / 100,
+    };
+    if (selected.gramsPerCup) entry.gramsPerCup = selected.gramsPerCup;
+    if (selected.servingGrams) entry.servingGrams = selected.servingGrams;
+    onAdd(entry);
     setSelected(null);
     setAmount("");
     setQuery("");
@@ -2043,7 +2056,7 @@ function Nutrition({
   setMealClipboard,
 }) {
   const [viewDate, setViewDate] = useState(todayStr());
-  const [form, setForm] = useState({ name: "", cal: "", protein: "", carbs: "", fat: "" });
+  const [form, setForm] = useState({ name: "", amount: "", unit: "oz", cal: "", protein: "", carbs: "", fat: "" });
   const [showCustom, setShowCustom] = useState(false);
   const [activeCategory, setActiveCategory] = useState("Breakfast");
   const [savingSetCategory, setSavingSetCategory] = useState(null);
@@ -2068,14 +2081,57 @@ function Nutrition({
 
   const addMeal = () => {
     if (!form.name || !form.cal) return;
-    const updated = { ...meals, [viewDate]: [{ id: uid(), ...form, category: activeCategory }, ...list] };
-    setMeals(updated);
-    setForm({ name: "", cal: "", protein: "", carbs: "", fat: "" });
+    const entry = {
+      id: uid(),
+      name: form.name,
+      cal: Number(form.cal) || 0,
+      protein: Number(form.protein) || 0,
+      carbs: Number(form.carbs) || 0,
+      fat: Number(form.fat) || 0,
+      category: activeCategory,
+    };
+    // If a portion was given, remember the per-gram rate so the amount can
+    // be changed later (directly, or after copying elsewhere) and have
+    // calories/macros rescale automatically instead of staying frozen.
+    const amt = Number(form.amount);
+    const grams = amt > 0 ? amt * (GRAMS_PER_UNIT[form.unit] || 1) : 0;
+    if (grams > 0) {
+      entry.amount = amt;
+      entry.unit = form.unit;
+      entry.calPerG = entry.cal / grams;
+      entry.proteinPerG = entry.protein / grams;
+      entry.carbsPerG = entry.carbs / grams;
+      entry.fatPerG = entry.fat / grams;
+    }
+    setMeals({ ...meals, [viewDate]: [entry, ...list] });
+    setForm({ name: "", amount: "", unit: "oz", cal: "", protein: "", carbs: "", fat: "" });
   };
   const removeMeal = (id) => setMeals({ ...meals, [viewDate]: list.filter((m) => m.id !== id) });
   const startEditMeal = (m) => {
     setEditMealId(m.id);
     setEditMealForm({ ...m });
+  };
+  // Changing amount/unit on a portion-tracked entry rescales cal/protein/
+  // carbs/fat live, using the per-gram rate captured when it was created —
+  // that rate never changes, only the displayed totals do.
+  const updateEditPortion = (newAmount, newUnit) => {
+    setEditMealForm((f) => {
+      const grams = gramsForUnit(f, newUnit, newAmount);
+      const updated = {
+        ...f,
+        amount: newAmount,
+        unit: newUnit,
+        cal: Math.round(f.calPerG * grams),
+        protein: Math.round(f.proteinPerG * grams * 10) / 10,
+        carbs: Math.round(f.carbsPerG * grams * 10) / 10,
+        fat: Math.round(f.fatPerG * grams * 10) / 10,
+      };
+      if (f.baseName) {
+        const plural = Number(newAmount) !== 1 && newUnit === "serving" ? "s" : "";
+        updated.name = `${newAmount} ${newUnit}${plural} ${f.baseName}`;
+      }
+      return updated;
+    });
   };
   const saveEditMeal = () => {
     setMeals({ ...meals, [viewDate]: list.map((m) => (m.id === editMealId ? { ...editMealForm } : m)) });
@@ -2083,17 +2139,32 @@ function Nutrition({
     setEditMealForm(null);
   };
 
+  const snapshotForClipboard = (m) => {
+    const base = { name: m.name, cal: m.cal, protein: m.protein, carbs: m.carbs, fat: m.fat };
+    if (m.calPerG !== undefined) {
+      base.amount = m.amount;
+      base.unit = m.unit;
+      base.calPerG = m.calPerG;
+      base.proteinPerG = m.proteinPerG;
+      base.carbsPerG = m.carbsPerG;
+      base.fatPerG = m.fatPerG;
+      if (m.baseName) base.baseName = m.baseName;
+      if (m.gramsPerCup) base.gramsPerCup = m.gramsPerCup;
+      if (m.servingGrams) base.servingGrams = m.servingGrams;
+    }
+    return base;
+  };
   const toggleSelected = (id) => {
     setSelectedIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
   };
   const copySelected = () => {
-    const items = list.filter((m) => selectedIds.includes(m.id)).map(({ name, cal, protein, carbs, fat }) => ({ name, cal, protein, carbs, fat }));
+    const items = list.filter((m) => selectedIds.includes(m.id)).map(snapshotForClipboard);
     if (items.length === 0) return;
     setMealClipboard(items);
     setSelectedIds([]);
   };
   const copyOne = (m) => {
-    setMealClipboard([{ name: m.name, cal: m.cal, protein: m.protein, carbs: m.carbs, fat: m.fat }]);
+    setMealClipboard([snapshotForClipboard(m)]);
   };
   const pasteClipboard = () => {
     if (mealClipboard.length === 0) return;
@@ -2270,12 +2341,25 @@ function Nutrition({
       {showCustom && (
         <Card>
           <Eyebrow>Custom entry — {activeCategory}</Eyebrow>
-          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr", gap: 10 }}>
-            <Input placeholder="Meal / food" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          <Input placeholder="Meal / food" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} style={{ marginBottom: 10 }} />
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(80px,1fr))", gap: 10 }}>
+            <Input placeholder="Portion amount" type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} />
+            <select
+              value={form.unit}
+              onChange={(e) => setForm({ ...form, unit: e.target.value })}
+              style={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "8px 10px", color: COLORS.ink }}
+            >
+              <option value="g">g</option>
+              <option value="oz">oz</option>
+              <option value="lb">lb</option>
+            </select>
             <Input placeholder="Calories" type="number" value={form.cal} onChange={(e) => setForm({ ...form, cal: e.target.value })} />
             <Input placeholder="Protein g" type="number" value={form.protein} onChange={(e) => setForm({ ...form, protein: e.target.value })} />
             <Input placeholder="Carbs g" type="number" value={form.carbs} onChange={(e) => setForm({ ...form, carbs: e.target.value })} />
             <Input placeholder="Fat g" type="number" value={form.fat} onChange={(e) => setForm({ ...form, fat: e.target.value })} />
+          </div>
+          <div style={{ color: COLORS.inkSoft, fontSize: 11.5, marginTop: 8 }}>
+            Portion amount is optional — but fill it in (e.g. "1" + "oz") and the calories/macros above should be for that exact amount. That lets you rescale this item later (directly, or after copying it) just by changing the portion.
           </div>
           <Button onClick={addMeal} style={{ marginTop: 12 }}>Add meal</Button>
         </Card>
@@ -2312,6 +2396,27 @@ function Nutrition({
                 {items.map((m) =>
                   editMealId === m.id ? (
                     <div key={m.id} style={{ padding: "8px 0", borderBottom: `1px solid ${COLORS.line}` }}>
+                      {editMealForm.calPerG !== undefined && (
+                        <div style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+                          <Input
+                            placeholder="Amount"
+                            type="number"
+                            value={editMealForm.amount}
+                            onChange={(e) => updateEditPortion(e.target.value, editMealForm.unit)}
+                            style={{ maxWidth: 90 }}
+                          />
+                          <select
+                            value={editMealForm.unit}
+                            onChange={(e) => updateEditPortion(editMealForm.amount, e.target.value)}
+                            style={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "8px 10px", color: COLORS.ink }}
+                          >
+                            {unitsForFood(editMealForm).map((u) => (
+                              <option key={u} value={u}>{u}</option>
+                            ))}
+                          </select>
+                          <div style={{ color: COLORS.inkSoft, fontSize: 11.5 }}>Change the portion and macros rescale automatically</div>
+                        </div>
+                      )}
                       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr", gap: 8 }}>
                         <Input value={editMealForm.name} onChange={(e) => setEditMealForm({ ...editMealForm, name: e.target.value })} />
                         <Input placeholder="Cal" type="number" value={editMealForm.cal} onChange={(e) => setEditMealForm({ ...editMealForm, cal: e.target.value })} />
@@ -2334,7 +2439,10 @@ function Nutrition({
                           style={{ marginTop: 4 }}
                         />
                         <div>
-                          <div style={{ color: COLORS.paper, fontSize: 14, fontWeight: 600 }}>{m.name}</div>
+                          <div style={{ color: COLORS.paper, fontSize: 14, fontWeight: 600 }}>
+                            {m.name}
+                            {m.calPerG !== undefined && <span style={{ color: COLORS.inkSoft, fontSize: 11.5, fontWeight: 400 }}> · {m.amount}{m.unit}</span>}
+                          </div>
                           <div style={{ color: COLORS.inkSoft, fontSize: 12 }}>{m.cal} kcal · P{m.protein || 0} C{m.carbs || 0} F{m.fat || 0}</div>
                         </div>
                       </div>

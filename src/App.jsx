@@ -735,6 +735,7 @@ export default function UltraTrainingApp() {
   const [withingsSyncStatus, setWithingsSyncStatus] = useState(null);
   const [withingsConnecting, setWithingsConnecting] = useState(false);
   const [weightLogs, setWeightLogs] = useState([]); // [ {id, date, weightLb, bodyFatPct, muscleMassLb, stravaId?} ]
+  const [mealClipboard, setMealClipboard] = useState([]); // [ {name,cal,protein,carbs,fat} ] — copy/paste working clipboard, not persisted
 
   useEffect(() => {
     (async () => {
@@ -1126,6 +1127,8 @@ export default function UltraTrainingApp() {
             profile={profile}
             plan={plan}
             runs={runs}
+            mealClipboard={mealClipboard}
+            setMealClipboard={setMealClipboard}
           />
         )}
         {tab === "settings" && (
@@ -2036,6 +2039,8 @@ function Nutrition({
   profile,
   plan,
   runs,
+  mealClipboard,
+  setMealClipboard,
 }) {
   const [viewDate, setViewDate] = useState(todayStr());
   const [form, setForm] = useState({ name: "", cal: "", protein: "", carbs: "", fat: "" });
@@ -2045,7 +2050,14 @@ function Nutrition({
   const [setNameDraft, setSetNameDraft] = useState("");
   const [editMealId, setEditMealId] = useState(null);
   const [editMealForm, setEditMealForm] = useState(null);
+  const [selectedIds, setSelectedIds] = useState([]);
   const list = meals[viewDate] || [];
+
+  // Selecting items is a per-view action — clear the checkboxes whenever the
+  // viewed day changes so stale selections from a previous day don't linger.
+  useEffect(() => {
+    setSelectedIds([]);
+  }, [viewDate]);
 
   const energy = useMemo(() => computeDayEnergy(viewDate, profile, plan, runs), [viewDate, profile, plan, runs]);
   const { targetKcal, activityKcal, appliedDeficit, isHardDay, prescription, phase } = energy;
@@ -2070,6 +2082,25 @@ function Nutrition({
     setEditMealId(null);
     setEditMealForm(null);
   };
+
+  const toggleSelected = (id) => {
+    setSelectedIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+  };
+  const copySelected = () => {
+    const items = list.filter((m) => selectedIds.includes(m.id)).map(({ name, cal, protein, carbs, fat }) => ({ name, cal, protein, carbs, fat }));
+    if (items.length === 0) return;
+    setMealClipboard(items);
+    setSelectedIds([]);
+  };
+  const copyOne = (m) => {
+    setMealClipboard([{ name: m.name, cal: m.cal, protein: m.protein, carbs: m.carbs, fat: m.fat }]);
+  };
+  const pasteClipboard = () => {
+    if (mealClipboard.length === 0) return;
+    const newItems = mealClipboard.map((it) => ({ id: uid(), ...it, category: activeCategory }));
+    setMeals({ ...meals, [viewDate]: [...newItems, ...list] });
+  };
+  const clearClipboard = () => setMealClipboard([]);
 
   const startSaveSet = (category, items) => {
     setSavingSetCategory(category);
@@ -2171,6 +2202,23 @@ function Nutrition({
         <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 10 }}>
           Everything you add below — search, saved combos, or custom entry — gets logged under <b style={{ color: COLORS.ink }}>{activeCategory}</b> for <b style={{ color: COLORS.ink }}>{fmtShort(viewDate)}</b>.
         </div>
+      </Card>
+
+      <Card style={mealClipboard.length > 0 ? { borderColor: COLORS.amber + "55" } : undefined}>
+        <Eyebrow>Clipboard {mealClipboard.length > 0 ? `· ${mealClipboard.length}` : ""}</Eyebrow>
+        {mealClipboard.length === 0 ? (
+          <div style={{ color: COLORS.inkSoft, fontSize: 13 }}>
+            Nothing copied — check items below (or use "Copy" on a single item) to copy them here, then come back to any meal, any day, and paste.
+          </div>
+        ) : (
+          <div>
+            <div style={{ color: COLORS.inkSoft, fontSize: 12.5, marginBottom: 10 }}>{mealClipboard.map((m) => m.name).join(" · ")}</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <Button onClick={pasteClipboard}>Paste to {activeCategory} — {fmtShort(viewDate)}</Button>
+              <Button variant="ghost" onClick={clearClipboard}>Clear</Button>
+            </div>
+          </div>
+        )}
       </Card>
 
       <Card>
@@ -2277,17 +2325,34 @@ function Nutrition({
                       </div>
                     </div>
                   ) : (
-                    <div key={m.id} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: `1px solid ${COLORS.line}` }}>
-                      <div>
-                        <div style={{ color: COLORS.paper, fontSize: 14, fontWeight: 600 }}>{m.name}</div>
-                        <div style={{ color: COLORS.inkSoft, fontSize: 12 }}>{m.cal} kcal · P{m.protein || 0} C{m.carbs || 0} F{m.fat || 0}</div>
+                    <div key={m.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "8px 0", borderBottom: `1px solid ${COLORS.line}`, gap: 10 }}>
+                      <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.includes(m.id)}
+                          onChange={() => toggleSelected(m.id)}
+                          style={{ marginTop: 4 }}
+                        />
+                        <div>
+                          <div style={{ color: COLORS.paper, fontSize: 14, fontWeight: 600 }}>{m.name}</div>
+                          <div style={{ color: COLORS.inkSoft, fontSize: 12 }}>{m.cal} kcal · P{m.protein || 0} C{m.carbs || 0} F{m.fat || 0}</div>
+                        </div>
                       </div>
-                      <div style={{ display: "flex", gap: 8 }}>
+                      <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                        <Button variant="ghost" onClick={() => copyOne(m)}>Copy</Button>
                         <Button variant="ghost" onClick={() => startEditMeal(m)}>Edit</Button>
                         <Button variant="danger" onClick={() => removeMeal(m.id)}>Remove</Button>
                       </div>
                     </div>
                   )
+                )}
+                {items.some((m) => selectedIds.includes(m.id)) && (
+                  <Button
+                    onClick={copySelected}
+                    style={{ alignSelf: "flex-start", marginTop: 4 }}
+                  >
+                    Copy {items.filter((m) => selectedIds.includes(m.id)).length} selected
+                  </Button>
                 )}
                 {items.length > 1 && savingSetCategory !== category && (
                   <Button variant="ghost" onClick={() => startSaveSet(category, items)} style={{ alignSelf: "flex-start", marginTop: 4 }}>

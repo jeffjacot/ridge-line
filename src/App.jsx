@@ -2428,7 +2428,27 @@ function Nutrition({
 
       {showCustom && (
         <Card>
-          <Eyebrow>Custom entry — {activeCategory}</Eyebrow>
+          <Eyebrow>Custom entry</Eyebrow>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+            {MEAL_CATEGORIES.map((c) => (
+              <div
+                key={c}
+                onClick={() => setActiveCategory(c)}
+                style={{
+                  padding: "6px 12px",
+                  borderRadius: 20,
+                  fontSize: 12.5,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  background: activeCategory === c ? COLORS.amber : "transparent",
+                  color: activeCategory === c ? "#1B140A" : COLORS.inkSoft,
+                  border: `1px solid ${activeCategory === c ? COLORS.amber : COLORS.line}`,
+                }}
+              >
+                {c}
+              </div>
+            ))}
+          </div>
           <Input placeholder="Meal / food" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} style={{ marginBottom: 10 }} />
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(80px,1fr))", gap: 10 }}>
             <Input placeholder="Portion amount" type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} />

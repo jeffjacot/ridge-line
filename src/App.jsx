@@ -427,6 +427,53 @@ function latestWithTrend(weightLogs, field) {
   return { value: latest[field], delta, date: latest.date };
 }
 
+// Plain-text summary of the athlete's current data, sent to Claude as the
+// basis for pre/post-run coaching. Kept as prose rather than JSON since
+// that's what reads most naturally as a coaching prompt.
+function buildCoachingSnapshot(mode, { raceDate, plan, currentWeek, runs, weightLogs, profile }) {
+  const daysToRace = daysBetween(new Date(), new Date(raceDate + "T00:00:00"));
+  const today = todayStr();
+  const todaysPrescription = currentWeek.days.find((d) => d.date === today);
+  const wkStart = new Date(currentWeek.start + "T00:00:00");
+  const wkEnd = new Date(wkStart);
+  wkEnd.setDate(wkEnd.getDate() + 7);
+  const weekMiles = runs
+    .filter((r) => {
+      const d = new Date(r.date + "T00:00:00");
+      return d >= wkStart && d < wkEnd;
+    })
+    .reduce((s, r) => s + Number(r.distance || 0), 0);
+
+  const recentRuns = runs.slice().sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 10);
+  const runLines = recentRuns
+    .map((r) => {
+      const paceNum = Number(r.distance) > 0 && Number(r.durationMin) > 0 ? Number(r.durationMin) / Number(r.distance) : null;
+      const paceStr = paceNum ? `${Math.floor(paceNum)}:${Math.round((paceNum - Math.floor(paceNum)) * 60).toString().padStart(2, "0")}/mi` : "—";
+      return `${r.date} — ${r.type}, ${r.distance || 0} mi, ${r.durationMin || 0} min, pace ${paceStr}${r.avgHR ? `, avg HR ${r.avgHR}` : ""}${Number(r.elevation) > 0 ? `, ${r.elevation} ft gain` : ""}`;
+    })
+    .join("\n");
+
+  const weight = latestWithTrend(weightLogs, "weightLb");
+  const bodyFat = latestWithTrend(weightLogs, "bodyFatPct");
+  const muscle = latestWithTrend(weightLogs, "muscleMassLb");
+  const bodyCompLines = [];
+  if (weight) bodyCompLines.push(`Weight: ${weight.value} lb (${weight.delta != null ? `${weight.delta > 0 ? "+" : ""}${weight.delta} lb vs 7 days ago` : "no 7-day comparison yet"})`);
+  if (bodyFat) bodyCompLines.push(`Body fat: ${bodyFat.value}% (${bodyFat.delta != null ? `${bodyFat.delta > 0 ? "+" : ""}${bodyFat.delta}% vs 7 days ago` : "no 7-day comparison yet"})`);
+  if (muscle) bodyCompLines.push(`Muscle mass: ${muscle.value} lb (${muscle.delta != null ? `${muscle.delta > 0 ? "+" : ""}${muscle.delta} lb vs 7 days ago` : "no 7-day comparison yet"})`);
+
+  let snapshot = `Training for a 50-mile ultramarathon, race in ${daysToRace} days (${raceDate}). Currently in ${currentWeek.phase} phase, week ${currentWeek.week} of ${plan.weeks.length}${currentWeek.isCutback ? " (cutback week — volume intentionally reduced)" : ""}.\n\n`;
+  snapshot += `Today (${today}) is prescribed: ${
+    todaysPrescription ? (todaysPrescription.type === "Rest" ? "Rest day" : `${todaysPrescription.type}, ${todaysPrescription.miles} mi${todaysPrescription.strength ? " + strength session" : ""}`) : "unknown"
+  }.\n\n`;
+  snapshot += `This week so far: ${Math.round(weekMiles * 10) / 10} mi logged of ${currentWeek.totalMiles} mi planned.\n\n`;
+  if (profile.weightLossMode) {
+    snapshot += `Currently targeting a ${profile.deficitKcal} kcal/day deficit on easy/rest days (automatically paused on long run and back-to-back days).\n\n`;
+  }
+  snapshot += `Recent runs, most recent first${mode === "post" ? " (the top one is the run just completed)" : ""}:\n${runLines || "None logged yet."}\n`;
+  if (bodyCompLines.length > 0) snapshot += `\nBody composition:\n${bodyCompLines.join("\n")}\n`;
+  return snapshot;
+}
+
 // Suggested macro split for a given day's calorie target. Protein anchors to
 // bodyweight when known (0.8 g/lb is a solid endurance+strength number,
 // comfortably covers muscle maintenance even in a deficit). Fat holds a
@@ -527,7 +574,7 @@ async function saveJSON(key, value) {
   }
 }
 
-const ALL_STORAGE_KEYS = ["race-date", "plan-start-date", "profile", "runs", "strength-logs", "meals", "saved-meals", "saved-meal-sets"];
+const ALL_STORAGE_KEYS = ["race-date", "plan-start-date", "profile", "runs", "strength-logs", "meals", "saved-meal-sets", "custom-foods", "weight-logs", "strava-auth", "withings-auth"];
 
 function exportAllData() {
   const dump = {};
@@ -668,6 +715,27 @@ function MacroRingsCombined({ macros, centerLabel, centerValue }) {
     </div>
   );
 }
+
+// Shared pre/post-run coaching card. Only shows its result when the mode it
+// was invoked with matches this card's mode, since coaching state is shared
+// across Dashboard (pre) and Training Log (post) rather than duplicated.
+function CoachCard({ mode, label, coachMode, coachAdvice, coachLoading, coachError, onGetCoaching }) {
+  const isThisMode = coachMode === mode;
+  return (
+    <Card style={{ borderColor: COLORS.amber + "55" }}>
+      <Eyebrow>Coach</Eyebrow>
+      <Button variant="ghost" onClick={() => onGetCoaching(mode)}>
+        {coachLoading && isThisMode ? "Thinking…" : label}
+      </Button>
+      {isThisMode && coachError && <div style={{ color: COLORS.rust, fontSize: 12.5, marginTop: 10 }}>{coachError}</div>}
+      {isThisMode && coachAdvice && !coachLoading && (
+        <div style={{ color: COLORS.ink, fontSize: 13.5, lineHeight: 1.6, marginTop: 10 }}>{coachAdvice}</div>
+      )}
+      <div style={{ color: COLORS.inkSoft, fontSize: 11, marginTop: 10 }}>AI-generated based on your logged data — not a substitute for how you actually feel.</div>
+    </Card>
+  );
+}
+
 function Input(props) {
   return (
     <input
@@ -753,6 +821,11 @@ export default function UltraTrainingApp() {
   const [withingsConnecting, setWithingsConnecting] = useState(false);
   const [weightLogs, setWeightLogs] = useState([]); // [ {id, date, weightLb, bodyFatPct, muscleMassLb, stravaId?} ]
   const [mealClipboard, setMealClipboard] = useState([]); // [ {name,cal,protein,carbs,fat} ] — copy/paste working clipboard, not persisted
+  const [customFoods, setCustomFoods] = useState([]); // [ {id,name,cal,protein,carbs,fat} ] — macros per 100g, same shape as FOOD_DB, so they search/scale the same way
+  const [coachAdvice, setCoachAdvice] = useState(null);
+  const [coachMode, setCoachMode] = useState(null);
+  const [coachLoading, setCoachLoading] = useState(false);
+  const [coachError, setCoachError] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -766,6 +839,7 @@ export default function UltraTrainingApp() {
       const sa = await loadJSON("strava-auth", null);
       const wa = await loadJSON("withings-auth", null);
       const wl = await loadJSON("weight-logs", []);
+      const cf = await loadJSON("custom-foods", []);
       setRaceDate(rd);
       setPlanStartDate(psd);
       setProfile(pr);
@@ -776,6 +850,7 @@ export default function UltraTrainingApp() {
       setStravaAuth(sa);
       setWithingsAuth(wa);
       setWeightLogs(wl);
+      setCustomFoods(cf);
       setReady(true);
 
       // If Strava or Withings just redirected back with ?code=..., exchange
@@ -857,6 +932,9 @@ export default function UltraTrainingApp() {
   useEffect(() => {
     if (ready) saveJSON("weight-logs", weightLogs);
   }, [weightLogs, ready]);
+  useEffect(() => {
+    if (ready) saveJSON("custom-foods", customFoods);
+  }, [customFoods, ready]);
 
   const connectStrava = () => {
     const redirectUri = window.location.origin + window.location.pathname;
@@ -1006,6 +1084,30 @@ export default function UltraTrainingApp() {
     return plan.weeks[Math.min(Math.max(idx, 0), plan.weeks.length - 1)];
   }, [plan]);
 
+  const getCoaching = async (mode) => {
+    setCoachLoading(true);
+    setCoachError(null);
+    setCoachMode(mode);
+    try {
+      const snapshot = buildCoachingSnapshot(mode, { raceDate, plan, currentWeek, runs, weightLogs, profile });
+      const res = await fetch("/api/coach", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, snapshot }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setCoachError(data.error?.message || JSON.stringify(data.error) || "Coaching request failed.");
+        return;
+      }
+      setCoachAdvice(data.advice);
+    } catch (e) {
+      setCoachError("Couldn't reach the coach — check your connection and try again.");
+    } finally {
+      setCoachLoading(false);
+    }
+  };
+
   const todaysMeals = meals[todayStr()] || [];
   const todaysCalories = todaysMeals.reduce((s, m) => s + Number(m.cal || 0), 0);
   const todaysRun = runs.find((r) => r.date === todayStr());
@@ -1110,6 +1212,11 @@ export default function UltraTrainingApp() {
             runs={runs}
             weightLogs={weightLogs}
             reducedFrequency={profile.reducedFrequency}
+            coachMode={coachMode}
+            coachAdvice={coachAdvice}
+            coachLoading={coachLoading}
+            coachError={coachError}
+            onGetCoaching={getCoaching}
           />
         )}
         {tab === "log" && (
@@ -1121,6 +1228,11 @@ export default function UltraTrainingApp() {
             stravaAuth={stravaAuth}
             onSyncStrava={syncStrava}
             stravaSyncStatus={stravaSyncStatus}
+            coachMode={coachMode}
+            coachAdvice={coachAdvice}
+            coachLoading={coachLoading}
+            coachError={coachError}
+            onGetCoaching={getCoaching}
           />
         )}
         {tab === "plan" && <PlanView plan={plan} />}
@@ -1148,6 +1260,8 @@ export default function UltraTrainingApp() {
             runs={runs}
             mealClipboard={mealClipboard}
             setMealClipboard={setMealClipboard}
+            customFoods={customFoods}
+            setCustomFoods={setCustomFoods}
           />
         )}
         {tab === "settings" && (
@@ -1167,6 +1281,8 @@ export default function UltraTrainingApp() {
             onConnectWithings={connectWithings}
             onDisconnectWithings={disconnectWithings}
             withingsConnecting={withingsConnecting}
+            customFoods={customFoods}
+            setCustomFoods={setCustomFoods}
           />
         )}
       </div>
@@ -1231,7 +1347,7 @@ function Strength({ currentPhase }) {
   );
 }
 
-function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalories, targetKcal, todaysRun, runs, weightLogs, reducedFrequency }) {
+function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalories, targetKcal, todaysRun, runs, weightLogs, reducedFrequency, coachMode, coachAdvice, coachLoading, coachError, onGetCoaching }) {
   const today = todayStr();
   const todaysPrescription = currentWeek.days.find((d) => d.date === today);
   const todaysMilesRun = useMemo(() => runs.filter((r) => r.date === today).reduce((s, r) => s + Number(r.distance || 0), 0), [runs, today]);
@@ -1286,6 +1402,16 @@ function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalor
           <Stat label={remainingCal < 0 ? "Over target" : "Remaining today"} value={Math.abs(Math.round(remainingCal))} unit="kcal" />
         </Card>
       </div>
+
+      <CoachCard
+        mode="pre"
+        label="Get pre-run coaching"
+        coachMode={coachMode}
+        coachAdvice={coachAdvice}
+        coachLoading={coachLoading}
+        coachError={coachError}
+        onGetCoaching={onGetCoaching}
+      />
 
       <Card>
         <Eyebrow>Body composition</Eyebrow>
@@ -1374,7 +1500,7 @@ function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalor
   );
 }
 
-function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, stravaAuth, onSyncStrava, stravaSyncStatus }) {
+function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, stravaAuth, onSyncStrava, stravaSyncStatus, coachMode, coachAdvice, coachLoading, coachError, onGetCoaching }) {
   const [viewDate, setViewDate] = useState(todayStr());
   const [form, setForm] = useState({ date: viewDate, type: "Easy", distance: "", durationMin: "", elevation: "", avgHR: "", notes: "" });
   const [editRunId, setEditRunId] = useState(null);
@@ -1519,6 +1645,18 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, stravaAuth,
           )}
         </div>
       </Card>
+
+      {viewDate === todayStr() && dayRuns.length > 0 && (
+        <CoachCard
+          mode="post"
+          label="Get post-run coaching"
+          coachMode={coachMode}
+          coachAdvice={coachAdvice}
+          coachLoading={coachLoading}
+          coachError={coachError}
+          onGetCoaching={onGetCoaching}
+        />
+      )}
 
       <Card>
         <Eyebrow>Strength — {fmtShort(viewDate)}</Eyebrow>
@@ -1870,7 +2008,7 @@ function PlanView({ plan }) {
   );
 }
 
-function FoodSearch({ onAdd, usdaApiKey }) {
+function FoodSearch({ onAdd, usdaApiKey, customFoods }) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(null);
   const [unit, setUnit] = useState("oz");
@@ -1884,7 +2022,8 @@ function FoodSearch({ onAdd, usdaApiKey }) {
     const q = query.trim().toLowerCase();
     if (!q) return [];
     const qWords = q.split(/\s+/).filter(Boolean);
-    const scored = FOOD_DB.map((f) => {
+    const pool = [...FOOD_DB, ...(customFoods || []).map((f) => ({ ...f, isMine: true }))];
+    const scored = pool.map((f) => {
       const key = f.name.split(",")[0].toLowerCase().trim();
       const keyWords = key.split(/\s+/).filter(Boolean);
       let score = 0;
@@ -1899,7 +2038,7 @@ function FoodSearch({ onAdd, usdaApiKey }) {
       .sort((a, b) => b.score - a.score)
       .slice(0, 8)
       .map((s) => s.food);
-  }, [query]);
+  }, [query, customFoods]);
 
   const bestMatchScore = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -2025,7 +2164,7 @@ function FoodSearch({ onAdd, usdaApiKey }) {
               onClick={() => pick(f)}
               style={{ padding: "9px 12px", cursor: "pointer", fontSize: 13.5, color: COLORS.ink, borderBottom: `1px solid ${COLORS.line}` }}
             >
-              {f.name} <span style={{ color: COLORS.inkSoft, fontSize: 12 }}>· {f.cal} kcal / 100g</span>
+              {f.name} <span style={{ color: COLORS.inkSoft, fontSize: 12 }}>· {f.cal} kcal / 100g{f.isMine ? " · yours" : ""}</span>
             </div>
           ))}
         </div>
@@ -2142,6 +2281,8 @@ function Nutrition({
   runs,
   mealClipboard,
   setMealClipboard,
+  customFoods,
+  setCustomFoods,
 }) {
   const [viewDate, setViewDate] = useState(todayStr());
   const [form, setForm] = useState({ name: "", amount: "", unit: "oz", cal: "", protein: "", carbs: "", fat: "" });
@@ -2190,6 +2331,23 @@ function Nutrition({
       entry.proteinPerG = entry.protein / grams;
       entry.carbsPerG = entry.carbs / grams;
       entry.fatPerG = entry.fat / grams;
+
+      // Same portion → same per-100g rate → this can go straight into the
+      // personal food library so it's searchable next time, no retyping.
+      const alreadySaved = customFoods.some((f) => f.name.toLowerCase() === form.name.trim().toLowerCase());
+      if (!alreadySaved) {
+        setCustomFoods([
+          {
+            id: uid(),
+            name: form.name.trim(),
+            cal: Math.round((entry.calPerG * 100) * 10) / 10,
+            protein: Math.round((entry.proteinPerG * 100) * 10) / 10,
+            carbs: Math.round((entry.carbsPerG * 100) * 10) / 10,
+            fat: Math.round((entry.fatPerG * 100) * 10) / 10,
+          },
+          ...customFoods,
+        ]);
+      }
     }
     setMeals({ ...meals, [viewDate]: [entry, ...list] });
     setForm({ name: "", amount: "", unit: "oz", cal: "", protein: "", carbs: "", fat: "" });
@@ -2420,7 +2578,7 @@ function Nutrition({
         )}
       </Card>
 
-      <FoodSearch onAdd={addFromSearch} usdaApiKey={profile.usdaApiKey} />
+      <FoodSearch onAdd={addFromSearch} usdaApiKey={profile.usdaApiKey} customFoods={customFoods} />
 
       {!showCustom && (
         <Button variant="ghost" onClick={() => setShowCustom(true)}>+ Add a custom food not in the database</Button>
@@ -2617,6 +2775,8 @@ function Settings({
   onConnectWithings,
   onDisconnectWithings,
   withingsConnecting,
+  customFoods,
+  setCustomFoods,
 }) {
   const [importMsg, setImportMsg] = useState(null);
   const fileInputRef = React.useRef(null);
@@ -2767,6 +2927,27 @@ function Settings({
               />
             </div>
             <Button onClick={onConnectWithings}>{withingsConnecting ? "Connecting…" : "Connect Withings"}</Button>
+          </div>
+        )}
+      </Card>
+      <Card>
+        <Eyebrow>My saved foods · {customFoods.length}</Eyebrow>
+        <div style={{ color: COLORS.inkSoft, fontSize: 12.5, marginBottom: 12, lineHeight: 1.6 }}>
+          Any custom food you log with a portion filled in gets saved here automatically, so it shows up in search from then on — no retyping, no digging through old days.
+        </div>
+        {customFoods.length === 0 ? (
+          <div style={{ color: COLORS.inkSoft, fontSize: 13 }}>Nothing saved yet.</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 260, overflowY: "auto" }}>
+            {customFoods.map((f) => (
+              <div key={f.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: `1px solid ${COLORS.line}` }}>
+                <div>
+                  <div style={{ color: COLORS.ink, fontSize: 13.5, fontWeight: 600 }}>{f.name}</div>
+                  <div style={{ color: COLORS.inkSoft, fontSize: 11.5 }}>{f.cal} kcal · P{f.protein} C{f.carbs} F{f.fat} / 100g</div>
+                </div>
+                <Button variant="danger" onClick={() => setCustomFoods(customFoods.filter((x) => x.id !== f.id))}>Remove</Button>
+              </div>
+            ))}
           </div>
         )}
       </Card>

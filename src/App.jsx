@@ -430,6 +430,25 @@ function latestWithTrend(weightLogs, field) {
 // Plain-text summary of the athlete's current data, sent to Claude as the
 // basis for pre/post-run coaching. Kept as prose rather than JSON since
 // that's what reads most naturally as a coaching prompt.
+// NWS Rothfusz heat index — only a meaningful number above ~80°F; below
+// that, humidity's effect on perceived heat is small enough to ignore.
+function calcHeatIndex(tempF, humidityPct) {
+  if (tempF == null || humidityPct == null || tempF < 80) return null;
+  const T = tempF,
+    RH = humidityPct;
+  const hi =
+    -42.379 +
+    2.04901523 * T +
+    10.14333127 * RH -
+    0.22475541 * T * RH -
+    0.00683783 * T * T -
+    0.05481717 * RH * RH +
+    0.00122874 * T * T * RH +
+    0.00085282 * T * RH * RH -
+    0.00000199 * T * T * RH * RH;
+  return Math.round(hi);
+}
+
 function buildCoachingSnapshot(mode, { raceDate, plan, currentWeek, runs, weightLogs, profile }) {
   const daysToRace = daysBetween(new Date(), new Date(raceDate + "T00:00:00"));
   const today = todayStr();
@@ -449,9 +468,14 @@ function buildCoachingSnapshot(mode, { raceDate, plan, currentWeek, runs, weight
     .map((r) => {
       const paceNum = Number(r.distance) > 0 && Number(r.durationMin) > 0 ? Number(r.durationMin) / Number(r.distance) : null;
       const paceStr = paceNum ? `${Math.floor(paceNum)}:${Math.round((paceNum - Math.floor(paceNum)) * 60).toString().padStart(2, "0")}/mi` : "—";
-      return `${r.date} — ${r.type}, ${r.distance || 0} mi, ${r.durationMin || 0} min, pace ${paceStr}${r.avgHR ? `, avg HR ${r.avgHR}` : ""}${Number(r.elevation) > 0 ? `, ${r.elevation} ft gain` : ""}`;
+      const weatherStr =
+        r.tempF != null
+          ? `, ${r.tempF}°F${r.humidityPct != null ? `/${r.humidityPct}% humidity` : ""}${r.heatIndexF != null ? ` (heat index ${r.heatIndexF}°F)` : ""}`
+          : "";
+      return `${r.date} — ${r.type}, ${r.distance || 0} mi, ${r.durationMin || 0} min, pace ${paceStr}${r.avgHR ? `, avg HR ${r.avgHR}` : ""}${Number(r.elevation) > 0 ? `, ${r.elevation} ft gain` : ""}${weatherStr}`;
     })
     .join("\n");
+  const hasHeatData = recentRuns.some((r) => r.heatIndexF != null && r.heatIndexF >= 85);
 
   const weight = latestWithTrend(weightLogs, "weightLb");
   const bodyFat = latestWithTrend(weightLogs, "bodyFatPct");
@@ -469,7 +493,10 @@ function buildCoachingSnapshot(mode, { raceDate, plan, currentWeek, runs, weight
   if (profile.weightLossMode) {
     snapshot += `Currently targeting a ${profile.deficitKcal} kcal/day deficit on easy/rest days (automatically paused on long run and back-to-back days).\n\n`;
   }
-  snapshot += `Recent runs, most recent first${mode === "post" ? " (the top one is the run just completed)" : ""}:\n${runLines || "None logged yet."}\n`;
+  snapshot += `Recent runs, most recent first${mode === "post" ? " (the top one is the run just completed)" : ""} — temp/humidity/heat index shown when available, pulled from real historical weather at that run's location and time:\n${runLines || "None logged yet."}\n`;
+  if (hasHeatData) {
+    snapshot += `\nNote: this athlete trains in hot, humid conditions. Heart rate runs higher at a given pace in heat/humidity — this is a normal physiological response (more blood flow diverted to skin for cooling), not a sign of declining fitness. When heat index is elevated (~85°F+) on a run, judge effort by HR and perceived effort rather than pace, and don't read a slower pace at the same HR on a hot day as a fitness regression.\n`;
+  }
   if (bodyCompLines.length > 0) snapshot += `\nBody composition:\n${bodyCompLines.join("\n")}\n`;
   return snapshot;
 }
@@ -973,19 +1000,46 @@ export default function UltraTrainingApp() {
         return;
       }
       const existingIds = new Set(runs.map((r) => r.stravaId).filter(Boolean));
-      const newRuns = (data.activities || [])
-        .filter((a) => (a.type === "Run" || a.type === "Walk") && !existingIds.has(a.id))
-        .map((a) => ({
-          id: uid(),
-          stravaId: a.id,
-          date: (a.start_date_local || a.start_date || "").slice(0, 10),
-          type: a.type === "Walk" ? "Walk" : "Easy",
-          distance: Math.round((a.distance / 1609.34) * 100) / 100,
-          durationMin: Math.round(a.moving_time / 60),
-          elevation: Math.round((a.total_elevation_gain || 0) * 3.28084),
-          avgHR: a.average_heartrate ? Math.round(a.average_heartrate) : "",
-          notes: a.name || "",
-        }));
+      const newRunActivities = (data.activities || []).filter((a) => (a.type === "Run" || a.type === "Walk") && !existingIds.has(a.id));
+      const newRuns = await Promise.all(
+        newRunActivities.map(async (a) => {
+          const localStamp = a.start_date_local || a.start_date || "";
+          const entry = {
+            id: uid(),
+            stravaId: a.id,
+            date: localStamp.slice(0, 10),
+            type: a.type === "Walk" ? "Walk" : "Easy",
+            distance: Math.round((a.distance / 1609.34) * 100) / 100,
+            durationMin: Math.round(a.moving_time / 60),
+            elevation: Math.round((a.total_elevation_gain || 0) * 3.28084),
+            avgHR: a.average_heartrate ? Math.round(a.average_heartrate) : "",
+            notes: a.name || "",
+          };
+          // Strava doesn't track humidity at all, and only some devices record
+          // temperature — so pull real historical weather for the run's actual
+          // location and time instead. start_date_local carries a "Z" suffix
+          // but is already local wall-clock time (a known Strava quirk), so
+          // the hour is read directly from the string rather than via Date
+          // timezone conversion, which would double-shift it.
+          if (a.start_latlng && a.start_latlng.length === 2 && localStamp) {
+            try {
+              const [lat, lon] = a.start_latlng;
+              const hour = Number(localStamp.slice(11, 13)) || 0;
+              const wres = await fetch(`/api/weather?lat=${lat}&lon=${lon}&date=${entry.date}&hour=${hour}`);
+              const wdata = await wres.json();
+              if (wres.ok) {
+                if (wdata.tempF != null) entry.tempF = wdata.tempF;
+                if (wdata.humidityPct != null) entry.humidityPct = wdata.humidityPct;
+                const hi = calcHeatIndex(wdata.tempF, wdata.humidityPct);
+                if (hi != null) entry.heatIndexF = hi;
+              }
+            } catch (e) {
+              // Weather is a nice-to-have — never let a lookup failure block the run import.
+            }
+          }
+          return entry;
+        })
+      );
       if (newRuns.length > 0) setRuns([...newRuns, ...runs]);
 
       const existingStrengthIds = new Set(strengthLogs.map((s) => s.stravaId).filter(Boolean));
@@ -1502,7 +1556,7 @@ function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalor
 
 function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, stravaAuth, onSyncStrava, stravaSyncStatus, coachMode, coachAdvice, coachLoading, coachError, onGetCoaching }) {
   const [viewDate, setViewDate] = useState(todayStr());
-  const [form, setForm] = useState({ date: viewDate, type: "Easy", distance: "", durationMin: "", elevation: "", avgHR: "", notes: "" });
+  const [form, setForm] = useState({ date: viewDate, type: "Easy", distance: "", durationMin: "", elevation: "", avgHR: "", tempF: "", humidityPct: "", notes: "" });
   const [editRunId, setEditRunId] = useState(null);
   const [editRunForm, setEditRunForm] = useState(null);
   const [editStrengthId, setEditStrengthId] = useState(null);
@@ -1516,8 +1570,11 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, stravaAuth,
 
   const addRun = () => {
     if (!form.distance || !form.durationMin) return;
-    setRuns([{ id: uid(), ...form }, ...runs]);
-    setForm({ date: viewDate, type: "Easy", distance: "", durationMin: "", elevation: "", avgHR: "", notes: "" });
+    const entry = { id: uid(), ...form };
+    const hi = calcHeatIndex(Number(form.tempF) || null, Number(form.humidityPct) || null);
+    if (hi != null) entry.heatIndexF = hi;
+    setRuns([entry, ...runs]);
+    setForm({ date: viewDate, type: "Easy", distance: "", durationMin: "", elevation: "", avgHR: "", tempF: "", humidityPct: "", notes: "" });
   };
   const removeRun = (id) => setRuns(runs.filter((r) => r.id !== id));
   const startEditRun = (r) => {
@@ -1525,7 +1582,11 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, stravaAuth,
     setEditRunForm({ ...r });
   };
   const saveEditRun = () => {
-    setRuns(runs.map((r) => (r.id === editRunId ? { ...editRunForm } : r)));
+    const hi = calcHeatIndex(Number(editRunForm.tempF) || null, Number(editRunForm.humidityPct) || null);
+    const saved = { ...editRunForm };
+    if (hi != null) saved.heatIndexF = hi;
+    else delete saved.heatIndexF;
+    setRuns(runs.map((r) => (r.id === editRunId ? saved : r)));
     setEditRunId(null);
     setEditRunForm(null);
   };
@@ -1588,6 +1649,8 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, stravaAuth,
           <Input placeholder="Duration (min)" type="number" value={form.durationMin} onChange={(e) => setForm({ ...form, durationMin: e.target.value })} />
           <Input placeholder="Elevation gain (ft)" type="number" value={form.elevation} onChange={(e) => setForm({ ...form, elevation: e.target.value })} />
           <Input placeholder="Avg HR" type="number" value={form.avgHR} onChange={(e) => setForm({ ...form, avgHR: e.target.value })} />
+          <Input placeholder="Temp (°F)" type="number" value={form.tempF} onChange={(e) => setForm({ ...form, tempF: e.target.value })} />
+          <Input placeholder="Humidity (%)" type="number" value={form.humidityPct} onChange={(e) => setForm({ ...form, humidityPct: e.target.value })} />
         </div>
         <Input placeholder="Notes — terrain, effort, fueling…" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} style={{ marginTop: 10 }} />
         <Button onClick={addRun} style={{ marginTop: 12 }}>Add run</Button>
@@ -1615,6 +1678,8 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, stravaAuth,
                   <Input placeholder="Duration (min)" type="number" value={editRunForm.durationMin} onChange={(e) => setEditRunForm({ ...editRunForm, durationMin: e.target.value })} />
                   <Input placeholder="Elevation (ft)" type="number" value={editRunForm.elevation} onChange={(e) => setEditRunForm({ ...editRunForm, elevation: e.target.value })} />
                   <Input placeholder="Avg HR" type="number" value={editRunForm.avgHR} onChange={(e) => setEditRunForm({ ...editRunForm, avgHR: e.target.value })} />
+                  <Input placeholder="Temp (°F)" type="number" value={editRunForm.tempF || ""} onChange={(e) => setEditRunForm({ ...editRunForm, tempF: e.target.value })} />
+                  <Input placeholder="Humidity (%)" type="number" value={editRunForm.humidityPct || ""} onChange={(e) => setEditRunForm({ ...editRunForm, humidityPct: e.target.value })} />
                 </div>
                 <Input placeholder="Notes" value={editRunForm.notes} onChange={(e) => setEditRunForm({ ...editRunForm, notes: e.target.value })} style={{ marginTop: 8 }} />
                 <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
@@ -1633,6 +1698,8 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, stravaAuth,
                     {r.distance || 0} mi · {r.durationMin || 0} min · {pace(r)}
                     {Number(r.elevation) > 0 ? ` · ${r.elevation} ft gain` : ""}
                     {r.avgHR ? ` · ${r.avgHR} bpm` : ""}
+                    {r.tempF != null ? ` · ${r.tempF}°F${r.humidityPct != null ? `/${r.humidityPct}%` : ""}` : ""}
+                    {r.heatIndexF != null ? ` (feels ${r.heatIndexF}°F)` : ""}
                   </div>
                   {r.notes && <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 2 }}>{r.notes}</div>}
                 </div>

@@ -2293,13 +2293,20 @@ function Nutrition({
   const [editMealId, setEditMealId] = useState(null);
   const [editMealForm, setEditMealForm] = useState(null);
   const [selectedIds, setSelectedIds] = useState([]);
+  const [collapsedCategories, setCollapsedCategories] = useState([]);
   const list = meals[viewDate] || [];
 
   // Selecting items is a per-view action — clear the checkboxes whenever the
   // viewed day changes so stale selections from a previous day don't linger.
+  // Collapsed sections reset too — start each day fresh and expanded.
   useEffect(() => {
     setSelectedIds([]);
+    setCollapsedCategories([]);
   }, [viewDate]);
+
+  const toggleCollapsed = (category) => {
+    setCollapsedCategories((cats) => (cats.includes(category) ? cats.filter((c) => c !== category) : [...cats, category]));
+  };
 
   const energy = useMemo(() => computeDayEnergy(viewDate, profile, plan, runs), [viewDate, profile, plan, runs]);
   const { targetKcal, activityKcal, appliedDeficit, isHardDay, prescription, phase } = energy;
@@ -2642,105 +2649,116 @@ function Nutrition({
           }),
           { cal: 0, protein: 0, carbs: 0, fat: 0 }
         );
+        const isCollapsed = collapsedCategories.includes(category);
         return (
           <Card key={category}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-              <Eyebrow>{category}</Eyebrow>
+            <div
+              onClick={() => toggleCollapsed(category)}
+              style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", cursor: "pointer" }}
+            >
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                <span style={{ color: COLORS.inkSoft, fontSize: 12 }}>{isCollapsed ? "▸" : "▾"}</span>
+                <Eyebrow>{category}</Eyebrow>
+              </div>
               {items.length > 0 && (
                 <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 12.5, color: COLORS.amber }}>
                   {totals.cal} kcal · P{Math.round(totals.protein)} C{Math.round(totals.carbs)} F{Math.round(totals.fat)}
                 </div>
               )}
             </div>
-            <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 2, marginBottom: 10, lineHeight: 1.5 }}>
-              {mealGuidance(category, prescription, phase)}
-            </div>
-            {items.length === 0 ? (
-              <div style={{ color: COLORS.inkSoft, fontSize: 13 }}>Nothing logged yet.</div>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {items.map((m) =>
-                  editMealId === m.id ? (
-                    <div key={m.id} style={{ padding: "8px 0", borderBottom: `1px solid ${COLORS.line}` }}>
-                      {editMealForm.calPerG !== undefined && (
-                        <div style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
-                          <Input
-                            placeholder="Amount"
-                            type="number"
-                            value={editMealForm.amount}
-                            onChange={(e) => updateEditPortion(e.target.value, editMealForm.unit)}
-                            style={{ maxWidth: 90 }}
-                          />
-                          <select
-                            value={editMealForm.unit}
-                            onChange={(e) => updateEditPortion(editMealForm.amount, e.target.value)}
-                            style={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "8px 10px", color: COLORS.ink }}
-                          >
-                            {unitsForFood(editMealForm).map((u) => (
-                              <option key={u} value={u}>{u}</option>
-                            ))}
-                          </select>
-                          <div style={{ color: COLORS.inkSoft, fontSize: 11.5 }}>Change the portion and macros rescale automatically</div>
-                        </div>
-                      )}
-                      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr", gap: 8 }}>
-                        <Input value={editMealForm.name} onChange={(e) => setEditMealForm({ ...editMealForm, name: e.target.value })} />
-                        <Input placeholder="Cal" type="number" value={editMealForm.cal} onChange={(e) => setEditMealForm({ ...editMealForm, cal: e.target.value })} />
-                        <Input placeholder="P" type="number" value={editMealForm.protein} onChange={(e) => setEditMealForm({ ...editMealForm, protein: e.target.value })} />
-                        <Input placeholder="C" type="number" value={editMealForm.carbs} onChange={(e) => setEditMealForm({ ...editMealForm, carbs: e.target.value })} />
-                        <Input placeholder="F" type="number" value={editMealForm.fat} onChange={(e) => setEditMealForm({ ...editMealForm, fat: e.target.value })} />
-                      </div>
-                      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-                        <Button onClick={saveEditMeal}>Save</Button>
-                        <Button variant="ghost" onClick={() => setEditMealId(null)}>Cancel</Button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div key={m.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "8px 0", borderBottom: `1px solid ${COLORS.line}`, gap: 10 }}>
-                      <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-                        <input
-                          type="checkbox"
-                          checked={selectedIds.includes(m.id)}
-                          onChange={() => toggleSelected(m.id)}
-                          style={{ marginTop: 4 }}
-                        />
-                        <div>
-                          <div style={{ color: COLORS.paper, fontSize: 14, fontWeight: 600 }}>
-                            {m.name}
-                            {m.calPerG !== undefined && <span style={{ color: COLORS.inkSoft, fontSize: 11.5, fontWeight: 400 }}> · {m.amount}{m.unit}</span>}
+            {!isCollapsed && (
+              <>
+                <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 2, marginBottom: 10, lineHeight: 1.5 }}>
+                  {mealGuidance(category, prescription, phase)}
+                </div>
+                {items.length === 0 ? (
+                  <div style={{ color: COLORS.inkSoft, fontSize: 13 }}>Nothing logged yet.</div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {items.map((m) =>
+                      editMealId === m.id ? (
+                        <div key={m.id} style={{ padding: "8px 0", borderBottom: `1px solid ${COLORS.line}` }}>
+                          {editMealForm.calPerG !== undefined && (
+                            <div style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+                              <Input
+                                placeholder="Amount"
+                                type="number"
+                                value={editMealForm.amount}
+                                onChange={(e) => updateEditPortion(e.target.value, editMealForm.unit)}
+                                style={{ maxWidth: 90 }}
+                              />
+                              <select
+                                value={editMealForm.unit}
+                                onChange={(e) => updateEditPortion(editMealForm.amount, e.target.value)}
+                                style={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "8px 10px", color: COLORS.ink }}
+                              >
+                                {unitsForFood(editMealForm).map((u) => (
+                                  <option key={u} value={u}>{u}</option>
+                                ))}
+                              </select>
+                              <div style={{ color: COLORS.inkSoft, fontSize: 11.5 }}>Change the portion and macros rescale automatically</div>
+                            </div>
+                          )}
+                          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr", gap: 8 }}>
+                            <Input value={editMealForm.name} onChange={(e) => setEditMealForm({ ...editMealForm, name: e.target.value })} />
+                            <Input placeholder="Cal" type="number" value={editMealForm.cal} onChange={(e) => setEditMealForm({ ...editMealForm, cal: e.target.value })} />
+                            <Input placeholder="P" type="number" value={editMealForm.protein} onChange={(e) => setEditMealForm({ ...editMealForm, protein: e.target.value })} />
+                            <Input placeholder="C" type="number" value={editMealForm.carbs} onChange={(e) => setEditMealForm({ ...editMealForm, carbs: e.target.value })} />
+                            <Input placeholder="F" type="number" value={editMealForm.fat} onChange={(e) => setEditMealForm({ ...editMealForm, fat: e.target.value })} />
                           </div>
-                          <div style={{ color: COLORS.inkSoft, fontSize: 12 }}>{m.cal} kcal · P{m.protein || 0} C{m.carbs || 0} F{m.fat || 0}</div>
+                          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                            <Button onClick={saveEditMeal}>Save</Button>
+                            <Button variant="ghost" onClick={() => setEditMealId(null)}>Cancel</Button>
+                          </div>
                         </div>
+                      ) : (
+                        <div key={m.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "8px 0", borderBottom: `1px solid ${COLORS.line}`, gap: 10 }}>
+                          <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                            <input
+                              type="checkbox"
+                              checked={selectedIds.includes(m.id)}
+                              onChange={() => toggleSelected(m.id)}
+                              style={{ marginTop: 4 }}
+                            />
+                            <div>
+                              <div style={{ color: COLORS.paper, fontSize: 14, fontWeight: 600 }}>
+                                {m.name}
+                                {m.calPerG !== undefined && <span style={{ color: COLORS.inkSoft, fontSize: 11.5, fontWeight: 400 }}> · {m.amount}{m.unit}</span>}
+                              </div>
+                              <div style={{ color: COLORS.inkSoft, fontSize: 12 }}>{m.cal} kcal · P{m.protein || 0} C{m.carbs || 0} F{m.fat || 0}</div>
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                            <Button variant="ghost" onClick={() => copyOne(m)}>Copy</Button>
+                            <Button variant="ghost" onClick={() => startEditMeal(m)}>Edit</Button>
+                            <Button variant="danger" onClick={() => removeMeal(m.id)}>Remove</Button>
+                          </div>
+                        </div>
+                      )
+                    )}
+                    {items.some((m) => selectedIds.includes(m.id)) && (
+                      <Button
+                        onClick={copySelected}
+                        style={{ alignSelf: "flex-start", marginTop: 4 }}
+                      >
+                        Copy {items.filter((m) => selectedIds.includes(m.id)).length} selected
+                      </Button>
+                    )}
+                    {items.length > 1 && savingSetCategory !== category && (
+                      <Button variant="ghost" onClick={() => startSaveSet(category, items)} style={{ alignSelf: "flex-start", marginTop: 4 }}>
+                        Save this meal as a combo
+                      </Button>
+                    )}
+                    {savingSetCategory === category && (
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6, flexWrap: "wrap" }}>
+                        <Input value={setNameDraft} onChange={(e) => setSetNameDraft(e.target.value)} style={{ maxWidth: 220 }} />
+                        <Button onClick={() => confirmSaveSet(items)}>Save combo</Button>
+                        <Button variant="ghost" onClick={() => setSavingSetCategory(null)}>Cancel</Button>
                       </div>
-                      <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
-                        <Button variant="ghost" onClick={() => copyOne(m)}>Copy</Button>
-                        <Button variant="ghost" onClick={() => startEditMeal(m)}>Edit</Button>
-                        <Button variant="danger" onClick={() => removeMeal(m.id)}>Remove</Button>
-                      </div>
-                    </div>
-                  )
-                )}
-                {items.some((m) => selectedIds.includes(m.id)) && (
-                  <Button
-                    onClick={copySelected}
-                    style={{ alignSelf: "flex-start", marginTop: 4 }}
-                  >
-                    Copy {items.filter((m) => selectedIds.includes(m.id)).length} selected
-                  </Button>
-                )}
-                {items.length > 1 && savingSetCategory !== category && (
-                  <Button variant="ghost" onClick={() => startSaveSet(category, items)} style={{ alignSelf: "flex-start", marginTop: 4 }}>
-                    Save this meal as a combo
-                  </Button>
-                )}
-                {savingSetCategory === category && (
-                  <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6, flexWrap: "wrap" }}>
-                    <Input value={setNameDraft} onChange={(e) => setSetNameDraft(e.target.value)} style={{ maxWidth: 220 }} />
-                    <Button onClick={() => confirmSaveSet(items)}>Save combo</Button>
-                    <Button variant="ghost" onClick={() => setSavingSetCategory(null)}>Cancel</Button>
+                    )}
                   </div>
                 )}
-              </div>
+              </>
             )}
           </Card>
         );

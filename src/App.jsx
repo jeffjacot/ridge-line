@@ -450,8 +450,8 @@ function calcHeatIndex(tempF, humidityPct) {
 }
 
 function buildCoachingSnapshot(mode, { raceDate, plan, currentWeek, runs, weightLogs, profile }) {
-  const daysToRace = daysBetween(new Date(), new Date(raceDate + "T00:00:00"));
   const today = todayStr();
+  const daysToRace = daysBetween(new Date(today + "T00:00:00"), new Date(raceDate + "T00:00:00"));
   const todaysPrescription = currentWeek.days.find((d) => d.date === today);
   const wkStart = new Date(currentWeek.start + "T00:00:00");
   const wkEnd = new Date(wkStart);
@@ -534,7 +534,7 @@ function ElevationProfile({ plan }) {
     pts.map((p) => `L ${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ") +
     ` L ${w - pad},${h - pad} Z`;
 
-  const today = new Date();
+  const today = new Date(todayStr() + "T00:00:00");
   const start = new Date(plan.startDate + "T00:00:00");
   const totalDays = n * 7;
   const elapsed = Math.max(0, Math.min(totalDays, daysBetween(start, today)));
@@ -1129,11 +1129,11 @@ export default function UltraTrainingApp() {
   };
 
   const plan = useMemo(() => buildPlan(raceDate, planStartDate, profile.reducedFrequency), [raceDate, planStartDate, profile.reducedFrequency]);
-  const daysToRace = daysBetween(new Date(), new Date(raceDate + "T00:00:00"));
+  const daysToRace = daysBetween(new Date(todayStr() + "T00:00:00"), new Date(raceDate + "T00:00:00"));
   const weeksToRace = Math.max(0, Math.ceil(daysToRace / 7));
 
   const currentWeek = useMemo(() => {
-    const elapsed = daysBetween(new Date(plan.startDate + "T00:00:00"), new Date());
+    const elapsed = daysBetween(new Date(plan.startDate + "T00:00:00"), new Date(todayStr() + "T00:00:00"));
     const idx = Math.floor(elapsed / 7);
     return plan.weeks[Math.min(Math.max(idx, 0), plan.weeks.length - 1)];
   }, [plan]);

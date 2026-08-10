@@ -473,13 +473,24 @@ function buildCoachingSnapshot(mode, { raceDate, plan, currentWeek, runs, weight
   // just what's already happened.
   const weekScheduleLines = currentWeek.days
     .map((d) => {
-      const isPast = new Date(d.date + "T00:00:00") < new Date(today + "T00:00:00");
-      const isToday = d.date === today;
+      const dayDiff = daysBetween(new Date(today + "T00:00:00"), new Date(d.date + "T00:00:00"));
+      const isPast = dayDiff < 0;
+      const isToday = dayDiff === 0;
       const dayRuns = runs.filter((r) => r.date === d.date);
       const actualMiles = dayRuns.reduce((s, r) => s + Number(r.distance || 0), 0);
       const planLabel = d.type === "Rest" ? "Rest" : `${d.type}, ${d.miles} mi prescribed${d.strength ? " + strength" : ""}`;
       const actualLabel = isPast || isToday ? (dayRuns.length > 0 ? ` — actually ran ${Math.round(actualMiles * 10) / 10} mi` : isPast ? " — nothing logged" : "") : "";
-      return `${d.date} (${d.dayName})${isToday ? " [TODAY]" : ""}: ${planLabel}${actualLabel}`;
+      // Spell out the relative timing explicitly (TODAY / TOMORROW / in N
+      // days / N days ago) instead of leaving the model to work out the gap
+      // between today's date and this row's date itself — that's exactly
+      // the kind of arithmetic that quietly goes wrong even with correct data.
+      let relLabel;
+      if (dayDiff === 0) relLabel = "TODAY";
+      else if (dayDiff === 1) relLabel = "TOMORROW";
+      else if (dayDiff === -1) relLabel = "YESTERDAY";
+      else if (dayDiff > 1) relLabel = `in ${dayDiff} days`;
+      else relLabel = `${Math.abs(dayDiff)} days ago`;
+      return `${d.date} (${d.dayName}, ${relLabel}): ${planLabel}${actualLabel}`;
     })
     .join("\n");
 
@@ -494,7 +505,8 @@ function buildCoachingSnapshot(mode, { raceDate, plan, currentWeek, runs, weight
   if (bodyFat) bodyCompLines.push(`Body fat: ${bodyFat.value}% (${bodyFat.delta != null ? `${bodyFat.delta > 0 ? "+" : ""}${bodyFat.delta}% vs 7 days ago` : "no 7-day comparison yet"})`);
   if (muscle) bodyCompLines.push(`Muscle mass: ${muscle.value} lb (${muscle.delta != null ? `${muscle.delta > 0 ? "+" : ""}${muscle.delta} lb vs 7 days ago` : "no 7-day comparison yet"})`);
 
-  let snapshot = `Training for a 50-mile ultramarathon, race in ${daysToRace} days (${raceDate}). Currently in ${currentWeek.phase} phase, week ${currentWeek.week} of ${plan.weeks.length}${currentWeek.isCutback ? " (cutback week — volume intentionally reduced)" : ""}.\n\n`;
+  const todayDow = new Date(today + "T00:00:00").toLocaleDateString("en-US", { weekday: "long" });
+  let snapshot = `Today's date is ${today} (${todayDow}). Training for a 50-mile ultramarathon, race in ${daysToRace} days (${raceDate}). Currently in ${currentWeek.phase} phase, week ${currentWeek.week} of ${plan.weeks.length}${currentWeek.isCutback ? " (cutback week — volume intentionally reduced)" : ""}.\n\n`;
   snapshot += `This week's full schedule (Mon–Sun), with actuals filled in for days already passed:\n${weekScheduleLines}\n\n`;
   if (nextWeek) {
     snapshot += `Next week (week ${nextWeek.week}): ${nextWeek.phase} phase${nextWeek.isCutback ? ", cutback" : ""}, ${nextWeek.totalMiles} mi planned, long run ${nextWeek.longRun} mi.\n\n`;

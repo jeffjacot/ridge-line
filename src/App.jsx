@@ -26,6 +26,7 @@ const COLORS = {
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 const STRAVA_CLIENT_ID = "267417";
+const COACH_KICKOFF = "Give me your assessment based on my current data.";
 const fmtDate = (d) => {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -452,16 +453,6 @@ function calcHeatIndex(tempF, humidityPct) {
 function buildCoachingSnapshot(mode, { raceDate, plan, currentWeek, runs, weightLogs, profile }) {
   const today = todayStr();
   const daysToRace = daysBetween(new Date(today + "T00:00:00"), new Date(raceDate + "T00:00:00"));
-  const todaysPrescription = currentWeek.days.find((d) => d.date === today);
-  const wkStart = new Date(currentWeek.start + "T00:00:00");
-  const wkEnd = new Date(wkStart);
-  wkEnd.setDate(wkEnd.getDate() + 7);
-  const weekMiles = runs
-    .filter((r) => {
-      const d = new Date(r.date + "T00:00:00");
-      return d >= wkStart && d < wkEnd;
-    })
-    .reduce((s, r) => s + Number(r.distance || 0), 0);
 
   const recentRuns = runs.slice().sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 10);
   const runLines = recentRuns
@@ -477,6 +468,24 @@ function buildCoachingSnapshot(mode, { raceDate, plan, currentWeek, runs, weight
     .join("\n");
   const hasHeatData = recentRuns.some((r) => r.heatIndexF != null && r.heatIndexF >= 85);
 
+  // Full day-by-day schedule for this week — not just a mileage total — so
+  // the coach can actually see and speak to what's still coming up, not
+  // just what's already happened.
+  const weekScheduleLines = currentWeek.days
+    .map((d) => {
+      const isPast = new Date(d.date + "T00:00:00") < new Date(today + "T00:00:00");
+      const isToday = d.date === today;
+      const dayRuns = runs.filter((r) => r.date === d.date);
+      const actualMiles = dayRuns.reduce((s, r) => s + Number(r.distance || 0), 0);
+      const planLabel = d.type === "Rest" ? "Rest" : `${d.type}, ${d.miles} mi prescribed${d.strength ? " + strength" : ""}`;
+      const actualLabel = isPast || isToday ? (dayRuns.length > 0 ? ` — actually ran ${Math.round(actualMiles * 10) / 10} mi` : isPast ? " — nothing logged" : "") : "";
+      return `${d.date} (${d.dayName})${isToday ? " [TODAY]" : ""}: ${planLabel}${actualLabel}`;
+    })
+    .join("\n");
+
+  const weekIdx = plan.weeks.findIndex((w) => w.week === currentWeek.week);
+  const nextWeek = weekIdx >= 0 ? plan.weeks[weekIdx + 1] : null;
+
   const weight = latestWithTrend(weightLogs, "weightLb");
   const bodyFat = latestWithTrend(weightLogs, "bodyFatPct");
   const muscle = latestWithTrend(weightLogs, "muscleMassLb");
@@ -486,10 +495,10 @@ function buildCoachingSnapshot(mode, { raceDate, plan, currentWeek, runs, weight
   if (muscle) bodyCompLines.push(`Muscle mass: ${muscle.value} lb (${muscle.delta != null ? `${muscle.delta > 0 ? "+" : ""}${muscle.delta} lb vs 7 days ago` : "no 7-day comparison yet"})`);
 
   let snapshot = `Training for a 50-mile ultramarathon, race in ${daysToRace} days (${raceDate}). Currently in ${currentWeek.phase} phase, week ${currentWeek.week} of ${plan.weeks.length}${currentWeek.isCutback ? " (cutback week — volume intentionally reduced)" : ""}.\n\n`;
-  snapshot += `Today (${today}) is prescribed: ${
-    todaysPrescription ? (todaysPrescription.type === "Rest" ? "Rest day" : `${todaysPrescription.type}, ${todaysPrescription.miles} mi${todaysPrescription.strength ? " + strength session" : ""}`) : "unknown"
-  }.\n\n`;
-  snapshot += `This week so far: ${Math.round(weekMiles * 10) / 10} mi logged of ${currentWeek.totalMiles} mi planned.\n\n`;
+  snapshot += `This week's full schedule (Mon–Sun), with actuals filled in for days already passed:\n${weekScheduleLines}\n\n`;
+  if (nextWeek) {
+    snapshot += `Next week (week ${nextWeek.week}): ${nextWeek.phase} phase${nextWeek.isCutback ? ", cutback" : ""}, ${nextWeek.totalMiles} mi planned, long run ${nextWeek.longRun} mi.\n\n`;
+  }
   if (profile.weightLossMode) {
     snapshot += `Currently targeting a ${profile.deficitKcal} kcal/day deficit on easy/rest days (automatically paused on long run and back-to-back days).\n\n`;
   }
@@ -743,21 +752,77 @@ function MacroRingsCombined({ macros, centerLabel, centerValue }) {
   );
 }
 
-// Shared pre/post-run coaching card. Only shows its result when the mode it
-// was invoked with matches this card's mode, since coaching state is shared
-// across Dashboard (pre) and Training Log (post) rather than duplicated.
-function CoachCard({ mode, label, coachMode, coachAdvice, coachLoading, coachError, onGetCoaching }) {
-  const isThisMode = coachMode === mode;
+// Shared pre/post-run coaching chat. Conversation state lives in the parent
+// App (persisted to storage), so it survives reloads and tab switches —
+// this component just renders whichever mode's thread it's given.
+function CoachCard({ mode, label, coachConversations, coachActiveMode, coachLoading, coachError, onStartCoaching, onSendCoachMessage, onClearCoaching }) {
+  const [draft, setDraft] = useState("");
+  const messages = (coachConversations && coachConversations[mode]) || [];
+  const isThisMode = coachActiveMode === mode;
+  const isLoadingThis = coachLoading && isThisMode;
+  const visibleMessages = messages.filter((m) => !(m.role === "user" && m.content === COACH_KICKOFF));
+
+  const handleSend = () => {
+    if (!draft.trim()) return;
+    onSendCoachMessage(mode, draft);
+    setDraft("");
+  };
+
   return (
     <Card style={{ borderColor: COLORS.amber + "55" }}>
-      <Eyebrow>Coach</Eyebrow>
-      <Button variant="ghost" onClick={() => onGetCoaching(mode)}>
-        {coachLoading && isThisMode ? "Thinking…" : label}
-      </Button>
-      {isThisMode && coachError && <div style={{ color: COLORS.rust, fontSize: 12.5, marginTop: 10 }}>{coachError}</div>}
-      {isThisMode && coachAdvice && !coachLoading && (
-        <div style={{ color: COLORS.ink, fontSize: 13.5, lineHeight: 1.6, marginTop: 10 }}>{coachAdvice}</div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <Eyebrow>Coach</Eyebrow>
+        {messages.length > 0 && (
+          <Button variant="ghost" onClick={() => onClearCoaching(mode)} style={{ padding: "4px 10px", fontSize: 11.5 }}>
+            Start over
+          </Button>
+        )}
+      </div>
+
+      {messages.length === 0 ? (
+        <Button variant="ghost" onClick={() => onStartCoaching(mode)}>
+          {isLoadingThis ? "Thinking…" : label}
+        </Button>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {visibleMessages.map((m, i) => (
+            <div
+              key={i}
+              style={{
+                alignSelf: m.role === "user" ? "flex-end" : "flex-start",
+                maxWidth: "88%",
+                background: m.role === "user" ? COLORS.raised : "transparent",
+                border: m.role === "user" ? `1px solid ${COLORS.line}` : "none",
+                borderRadius: 10,
+                padding: m.role === "user" ? "8px 12px" : "0",
+                color: COLORS.ink,
+                fontSize: 13.5,
+                lineHeight: 1.6,
+              }}
+            >
+              {m.content}
+            </div>
+          ))}
+          {isLoadingThis && <div style={{ color: COLORS.inkSoft, fontSize: 13, fontStyle: "italic" }}>Thinking…</div>}
+        </div>
       )}
+
+      {isThisMode && coachError && <div style={{ color: COLORS.rust, fontSize: 12.5, marginTop: 10 }}>{coachError}</div>}
+
+      {messages.length > 0 && (
+        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+          <Input
+            placeholder="Ask a follow-up…"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleSend();
+            }}
+          />
+          <Button onClick={handleSend} disabled={isLoadingThis}>Send</Button>
+        </div>
+      )}
+
       <div style={{ color: COLORS.inkSoft, fontSize: 11, marginTop: 10 }}>AI-generated based on your logged data — not a substitute for how you actually feel.</div>
     </Card>
   );
@@ -849,8 +914,8 @@ export default function UltraTrainingApp() {
   const [weightLogs, setWeightLogs] = useState([]); // [ {id, date, weightLb, bodyFatPct, muscleMassLb, stravaId?} ]
   const [mealClipboard, setMealClipboard] = useState([]); // [ {name,cal,protein,carbs,fat} ] — copy/paste working clipboard, not persisted
   const [customFoods, setCustomFoods] = useState([]); // [ {id,name,cal,protein,carbs,fat} ] — macros per 100g, same shape as FOOD_DB, so they search/scale the same way
-  const [coachAdvice, setCoachAdvice] = useState(null);
-  const [coachMode, setCoachMode] = useState(null);
+  const [coachConversations, setCoachConversations] = useState({ pre: [], post: [] }); // { pre: [{role,content}], post: [...] } — persisted
+  const [coachActiveMode, setCoachActiveMode] = useState(null);
   const [coachLoading, setCoachLoading] = useState(false);
   const [coachError, setCoachError] = useState(null);
 
@@ -867,6 +932,7 @@ export default function UltraTrainingApp() {
       const wa = await loadJSON("withings-auth", null);
       const wl = await loadJSON("weight-logs", []);
       const cf = await loadJSON("custom-foods", []);
+      const cc = await loadJSON("coach-conversations", { pre: [], post: [] });
       setRaceDate(rd);
       setPlanStartDate(psd);
       setProfile(pr);
@@ -878,6 +944,7 @@ export default function UltraTrainingApp() {
       setWithingsAuth(wa);
       setWeightLogs(wl);
       setCustomFoods(cf);
+      setCoachConversations(cc);
       setReady(true);
 
       // If Strava or Withings just redirected back with ?code=..., exchange
@@ -962,6 +1029,9 @@ export default function UltraTrainingApp() {
   useEffect(() => {
     if (ready) saveJSON("custom-foods", customFoods);
   }, [customFoods, ready]);
+  useEffect(() => {
+    if (ready) saveJSON("coach-conversations", coachConversations);
+  }, [coachConversations, ready]);
 
   const connectStrava = () => {
     const redirectUri = window.location.origin + window.location.pathname;
@@ -1138,28 +1208,61 @@ export default function UltraTrainingApp() {
     return plan.weeks[Math.min(Math.max(idx, 0), plan.weeks.length - 1)];
   }, [plan]);
 
-  const getCoaching = async (mode) => {
+  const startCoaching = async (mode) => {
     setCoachLoading(true);
     setCoachError(null);
-    setCoachMode(mode);
+    setCoachActiveMode(mode);
     try {
       const snapshot = buildCoachingSnapshot(mode, { raceDate, plan, currentWeek, runs, weightLogs, profile });
+      const kickoffMessages = [{ role: "user", content: COACH_KICKOFF }];
       const res = await fetch("/api/coach", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode, snapshot }),
+        body: JSON.stringify({ mode, snapshot, messages: kickoffMessages }),
       });
       const data = await res.json();
       if (!res.ok) {
         setCoachError(data.error?.message || JSON.stringify(data.error) || "Coaching request failed.");
         return;
       }
-      setCoachAdvice(data.advice);
+      setCoachConversations((c) => ({ ...c, [mode]: [...kickoffMessages, { role: "assistant", content: data.reply }] }));
     } catch (e) {
       setCoachError("Couldn't reach the coach — check your connection and try again.");
     } finally {
       setCoachLoading(false);
     }
+  };
+
+  const sendCoachMessage = async (mode, text) => {
+    if (!text.trim()) return;
+    setCoachLoading(true);
+    setCoachError(null);
+    setCoachActiveMode(mode);
+    const updated = [...(coachConversations[mode] || []), { role: "user", content: text.trim() }];
+    setCoachConversations((c) => ({ ...c, [mode]: updated }));
+    try {
+      const snapshot = buildCoachingSnapshot(mode, { raceDate, plan, currentWeek, runs, weightLogs, profile });
+      const res = await fetch("/api/coach", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, snapshot, messages: updated }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setCoachError(data.error?.message || JSON.stringify(data.error) || "Coaching request failed.");
+        return;
+      }
+      setCoachConversations((c) => ({ ...c, [mode]: [...updated, { role: "assistant", content: data.reply }] }));
+    } catch (e) {
+      setCoachError("Couldn't reach the coach — check your connection and try again.");
+    } finally {
+      setCoachLoading(false);
+    }
+  };
+
+  const clearCoaching = (mode) => {
+    setCoachConversations((c) => ({ ...c, [mode]: [] }));
+    setCoachError(null);
   };
 
   const todaysMeals = meals[todayStr()] || [];
@@ -1266,11 +1369,13 @@ export default function UltraTrainingApp() {
             runs={runs}
             weightLogs={weightLogs}
             reducedFrequency={profile.reducedFrequency}
-            coachMode={coachMode}
-            coachAdvice={coachAdvice}
+            coachConversations={coachConversations}
+            coachActiveMode={coachActiveMode}
             coachLoading={coachLoading}
             coachError={coachError}
-            onGetCoaching={getCoaching}
+            onStartCoaching={startCoaching}
+            onSendCoachMessage={sendCoachMessage}
+            onClearCoaching={clearCoaching}
           />
         )}
         {tab === "log" && (
@@ -1282,11 +1387,13 @@ export default function UltraTrainingApp() {
             stravaAuth={stravaAuth}
             onSyncStrava={syncStrava}
             stravaSyncStatus={stravaSyncStatus}
-            coachMode={coachMode}
-            coachAdvice={coachAdvice}
+            coachConversations={coachConversations}
+            coachActiveMode={coachActiveMode}
             coachLoading={coachLoading}
             coachError={coachError}
-            onGetCoaching={getCoaching}
+            onStartCoaching={startCoaching}
+            onSendCoachMessage={sendCoachMessage}
+            onClearCoaching={clearCoaching}
           />
         )}
         {tab === "plan" && <PlanView plan={plan} />}
@@ -1401,7 +1508,7 @@ function Strength({ currentPhase }) {
   );
 }
 
-function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalories, targetKcal, todaysRun, runs, weightLogs, reducedFrequency, coachMode, coachAdvice, coachLoading, coachError, onGetCoaching }) {
+function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalories, targetKcal, todaysRun, runs, weightLogs, reducedFrequency, coachConversations, coachActiveMode, coachLoading, coachError, onStartCoaching, onSendCoachMessage, onClearCoaching }) {
   const today = todayStr();
   const todaysPrescription = currentWeek.days.find((d) => d.date === today);
   const todaysMilesRun = useMemo(() => runs.filter((r) => r.date === today).reduce((s, r) => s + Number(r.distance || 0), 0), [runs, today]);
@@ -1460,11 +1567,13 @@ function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalor
       <CoachCard
         mode="pre"
         label="Get pre-run coaching"
-        coachMode={coachMode}
-        coachAdvice={coachAdvice}
+        coachConversations={coachConversations}
+        coachActiveMode={coachActiveMode}
         coachLoading={coachLoading}
         coachError={coachError}
-        onGetCoaching={onGetCoaching}
+        onStartCoaching={onStartCoaching}
+        onSendCoachMessage={onSendCoachMessage}
+        onClearCoaching={onClearCoaching}
       />
 
       <Card>
@@ -1554,7 +1663,7 @@ function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalor
   );
 }
 
-function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, stravaAuth, onSyncStrava, stravaSyncStatus, coachMode, coachAdvice, coachLoading, coachError, onGetCoaching }) {
+function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, stravaAuth, onSyncStrava, stravaSyncStatus, coachConversations, coachActiveMode, coachLoading, coachError, onStartCoaching, onSendCoachMessage, onClearCoaching }) {
   const [viewDate, setViewDate] = useState(todayStr());
   const [form, setForm] = useState({ date: viewDate, type: "Easy", distance: "", durationMin: "", elevation: "", avgHR: "", tempF: "", humidityPct: "", notes: "" });
   const [editRunId, setEditRunId] = useState(null);
@@ -1717,11 +1826,13 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, stravaAuth,
         <CoachCard
           mode="post"
           label="Get post-run coaching"
-          coachMode={coachMode}
-          coachAdvice={coachAdvice}
+          coachConversations={coachConversations}
+          coachActiveMode={coachActiveMode}
           coachLoading={coachLoading}
           coachError={coachError}
-          onGetCoaching={onGetCoaching}
+          onStartCoaching={onStartCoaching}
+          onSendCoachMessage={onSendCoachMessage}
+          onClearCoaching={onClearCoaching}
         />
       )}
 

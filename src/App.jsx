@@ -767,12 +767,13 @@ function MacroRingsCombined({ macros, centerLabel, centerValue }) {
 // Shared pre/post-run coaching chat. Conversation state lives in the parent
 // App (persisted to storage), so it survives reloads and tab switches —
 // this component just renders whichever mode's thread it's given.
-function CoachCard({ mode, label, coachConversations, coachActiveMode, coachLoading, coachError, onStartCoaching, onSendCoachMessage, onClearCoaching }) {
+function CoachCard({ mode, label, coachConversations, coachActiveMode, coachLoading, coachError, onStartCoaching, onSendCoachMessage, onClearCoaching, coachRetry, onRetryCoaching }) {
   const [draft, setDraft] = useState("");
   const messages = (coachConversations && coachConversations[mode]) || [];
   const isThisMode = coachActiveMode === mode;
   const isLoadingThis = coachLoading && isThisMode;
   const visibleMessages = messages.filter((m) => !(m.role === "user" && m.content === COACH_KICKOFF));
+  const canRetry = coachRetry && coachRetry.mode === mode && !coachLoading;
 
   const handleSend = () => {
     if (!draft.trim()) return;
@@ -819,7 +820,16 @@ function CoachCard({ mode, label, coachConversations, coachActiveMode, coachLoad
         </div>
       )}
 
-      {isThisMode && coachError && <div style={{ color: COLORS.rust, fontSize: 12.5, marginTop: 10 }}>{coachError}</div>}
+      {isThisMode && coachError && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ color: COLORS.rust, fontSize: 12.5 }}>{coachError}</div>
+          {canRetry && (
+            <Button variant="ghost" onClick={onRetryCoaching} style={{ marginTop: 8 }}>
+              Retry
+            </Button>
+          )}
+        </div>
+      )}
 
       {messages.length > 0 && (
         <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
@@ -930,6 +940,7 @@ export default function UltraTrainingApp() {
   const [coachActiveMode, setCoachActiveMode] = useState(null);
   const [coachLoading, setCoachLoading] = useState(false);
   const [coachError, setCoachError] = useState(null);
+  const [coachRetry, setCoachRetry] = useState(null); // { mode, fn: "start"|"send", updated? } — lets a Retry button replay the exact failed request
 
   useEffect(() => {
     (async () => {
@@ -1220,6 +1231,27 @@ export default function UltraTrainingApp() {
     return plan.weeks[Math.min(Math.max(idx, 0), plan.weeks.length - 1)];
   }, [plan]);
 
+  // A couple of quick client-side retries too — this catches genuine network
+  // blips (dropped wifi, brief mobile signal loss) that never even reach the
+  // server, on top of the retries already happening server-side for
+  // upstream API hiccups.
+  const fetchCoachWithRetry = async (body, retries = 2) => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const res = await fetch("/api/coach", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        return { res, data };
+      } catch (e) {
+        if (attempt >= retries) throw e;
+        await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+      }
+    }
+  };
+
   const startCoaching = async (mode) => {
     setCoachLoading(true);
     setCoachError(null);
@@ -1227,19 +1259,17 @@ export default function UltraTrainingApp() {
     try {
       const snapshot = buildCoachingSnapshot(mode, { raceDate, plan, currentWeek, runs, weightLogs, profile });
       const kickoffMessages = [{ role: "user", content: COACH_KICKOFF }];
-      const res = await fetch("/api/coach", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode, snapshot, messages: kickoffMessages }),
-      });
-      const data = await res.json();
+      const { res, data } = await fetchCoachWithRetry({ mode, snapshot, messages: kickoffMessages });
       if (!res.ok) {
         setCoachError(data.error?.message || JSON.stringify(data.error) || "Coaching request failed.");
+        setCoachRetry({ mode, fn: "start" });
         return;
       }
       setCoachConversations((c) => ({ ...c, [mode]: [...kickoffMessages, { role: "assistant", content: data.reply }] }));
+      setCoachRetry(null);
     } catch (e) {
-      setCoachError("Couldn't reach the coach — check your connection and try again.");
+      setCoachError("Couldn't reach the coach after a few tries — check your connection.");
+      setCoachRetry({ mode, fn: "start" });
     } finally {
       setCoachLoading(false);
     }
@@ -1254,27 +1284,53 @@ export default function UltraTrainingApp() {
     setCoachConversations((c) => ({ ...c, [mode]: updated }));
     try {
       const snapshot = buildCoachingSnapshot(mode, { raceDate, plan, currentWeek, runs, weightLogs, profile });
-      const res = await fetch("/api/coach", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode, snapshot, messages: updated }),
-      });
-      const data = await res.json();
+      const { res, data } = await fetchCoachWithRetry({ mode, snapshot, messages: updated });
       if (!res.ok) {
         setCoachError(data.error?.message || JSON.stringify(data.error) || "Coaching request failed.");
+        setCoachRetry({ mode, fn: "send", updated });
         return;
       }
       setCoachConversations((c) => ({ ...c, [mode]: [...updated, { role: "assistant", content: data.reply }] }));
+      setCoachRetry(null);
     } catch (e) {
-      setCoachError("Couldn't reach the coach — check your connection and try again.");
+      setCoachError("Couldn't reach the coach after a few tries — check your connection.");
+      setCoachRetry({ mode, fn: "send", updated });
     } finally {
       setCoachLoading(false);
+    }
+  };
+
+  const retryCoaching = async () => {
+    if (!coachRetry) return;
+    if (coachRetry.fn === "start") {
+      await startCoaching(coachRetry.mode);
+    } else {
+      // Re-send the same already-appended message rather than appending it
+      // again — retryCoachSend replays the exact prior request.
+      setCoachLoading(true);
+      setCoachError(null);
+      setCoachActiveMode(coachRetry.mode);
+      try {
+        const snapshot = buildCoachingSnapshot(coachRetry.mode, { raceDate, plan, currentWeek, runs, weightLogs, profile });
+        const { res, data } = await fetchCoachWithRetry({ mode: coachRetry.mode, snapshot, messages: coachRetry.updated });
+        if (!res.ok) {
+          setCoachError(data.error?.message || JSON.stringify(data.error) || "Coaching request failed.");
+          return;
+        }
+        setCoachConversations((c) => ({ ...c, [coachRetry.mode]: [...coachRetry.updated, { role: "assistant", content: data.reply }] }));
+        setCoachRetry(null);
+      } catch (e) {
+        setCoachError("Couldn't reach the coach after a few tries — check your connection.");
+      } finally {
+        setCoachLoading(false);
+      }
     }
   };
 
   const clearCoaching = (mode) => {
     setCoachConversations((c) => ({ ...c, [mode]: [] }));
     setCoachError(null);
+    setCoachRetry(null);
   };
 
   const todaysMeals = meals[todayStr()] || [];
@@ -1388,6 +1444,8 @@ export default function UltraTrainingApp() {
             onStartCoaching={startCoaching}
             onSendCoachMessage={sendCoachMessage}
             onClearCoaching={clearCoaching}
+            coachRetry={coachRetry}
+            onRetryCoaching={retryCoaching}
           />
         )}
         {tab === "log" && (
@@ -1406,6 +1464,8 @@ export default function UltraTrainingApp() {
             onStartCoaching={startCoaching}
             onSendCoachMessage={sendCoachMessage}
             onClearCoaching={clearCoaching}
+            coachRetry={coachRetry}
+            onRetryCoaching={retryCoaching}
           />
         )}
         {tab === "plan" && <PlanView plan={plan} />}
@@ -1520,7 +1580,7 @@ function Strength({ currentPhase }) {
   );
 }
 
-function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalories, targetKcal, todaysRun, runs, weightLogs, reducedFrequency, coachConversations, coachActiveMode, coachLoading, coachError, onStartCoaching, onSendCoachMessage, onClearCoaching }) {
+function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalories, targetKcal, todaysRun, runs, weightLogs, reducedFrequency, coachConversations, coachActiveMode, coachLoading, coachError, onStartCoaching, onSendCoachMessage, onClearCoaching, coachRetry, onRetryCoaching }) {
   const today = todayStr();
   const todaysPrescription = currentWeek.days.find((d) => d.date === today);
   const todaysMilesRun = useMemo(() => runs.filter((r) => r.date === today).reduce((s, r) => s + Number(r.distance || 0), 0), [runs, today]);
@@ -1586,6 +1646,8 @@ function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalor
         onStartCoaching={onStartCoaching}
         onSendCoachMessage={onSendCoachMessage}
         onClearCoaching={onClearCoaching}
+        coachRetry={coachRetry}
+        onRetryCoaching={onRetryCoaching}
       />
 
       <Card>
@@ -1675,7 +1737,7 @@ function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalor
   );
 }
 
-function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, stravaAuth, onSyncStrava, stravaSyncStatus, coachConversations, coachActiveMode, coachLoading, coachError, onStartCoaching, onSendCoachMessage, onClearCoaching }) {
+function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, stravaAuth, onSyncStrava, stravaSyncStatus, coachConversations, coachActiveMode, coachLoading, coachError, onStartCoaching, onSendCoachMessage, onClearCoaching, coachRetry, onRetryCoaching }) {
   const [viewDate, setViewDate] = useState(todayStr());
   const [form, setForm] = useState({ date: viewDate, type: "Easy", distance: "", durationMin: "", elevation: "", avgHR: "", tempF: "", humidityPct: "", notes: "" });
   const [editRunId, setEditRunId] = useState(null);
@@ -1845,6 +1907,8 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, stravaAuth,
           onStartCoaching={onStartCoaching}
           onSendCoachMessage={onSendCoachMessage}
           onClearCoaching={onClearCoaching}
+          coachRetry={coachRetry}
+          onRetryCoaching={onRetryCoaching}
         />
       )}
 
@@ -1924,11 +1988,19 @@ function Progress({ plan, currentWeek, runs, strengthLogs, weightLogs, withingsA
   }, [plan, currentWeek, runs]);
 
   const longRunTrend = useMemo(() => {
-    return runs
+    // Sessions sometimes get split into two (or more) logged entries on the
+    // same day — e.g. a long run paused and resumed as separate Strava
+    // activities. Group by date and sum distance so the chart shows one
+    // point per day's actual total, not one point per logged entry.
+    const grouped = {};
+    runs
       .filter((r) => r.type === "Long Run" || r.type === "Back-to-Back")
-      .slice()
-      .sort((a, b) => new Date(a.date) - new Date(b.date))
-      .map((r) => ({ date: fmtShort(r.date), miles: Number(r.distance || 0) }));
+      .forEach((r) => {
+        grouped[r.date] = (grouped[r.date] || 0) + Number(r.distance || 0);
+      });
+    return Object.entries(grouped)
+      .sort((a, b) => new Date(a[0]) - new Date(b[0]))
+      .map(([date, miles]) => ({ date: fmtShort(date), miles: Math.round(miles * 100) / 100 }));
   }, [runs]);
 
   const hrPaceTrend = useMemo(() => {
@@ -2434,6 +2506,15 @@ function FoodSearch({ onAdd, usdaApiKey, customFoods }) {
 
 const MEAL_CATEGORIES = ["Breakfast", "Lunch", "Dinner", "Snacks"];
 
+// Midnight -> Breakfast, 10:59am -> Lunch, 4:00pm -> Dinner. Snacks is never
+// auto-selected — it's always a manual pick.
+function categoryForTime(date) {
+  const mins = date.getHours() * 60 + date.getMinutes();
+  if (mins < 10 * 60 + 59) return "Breakfast";
+  if (mins < 16 * 60) return "Lunch";
+  return "Dinner";
+}
+
 function mealGuidance(category, prescription, phase) {
   const isLongDay = !!prescription && /Long Run|Back-to-Back/.test(prescription.type);
   const isRest = !!prescription && prescription.type === "Rest";
@@ -2477,7 +2558,7 @@ function Nutrition({
   const [viewDate, setViewDate] = useState(todayStr());
   const [form, setForm] = useState({ name: "", amount: "", unit: "oz", cal: "", protein: "", carbs: "", fat: "" });
   const [showCustom, setShowCustom] = useState(false);
-  const [activeCategory, setActiveCategory] = useState("Breakfast");
+  const [activeCategory, setActiveCategory] = useState(() => categoryForTime(new Date()));
   const [savingSetCategory, setSavingSetCategory] = useState(null);
   const [setNameDraft, setSetNameDraft] = useState("");
   const [editMealId, setEditMealId] = useState(null);
@@ -2485,6 +2566,16 @@ function Nutrition({
   const [selectedIds, setSelectedIds] = useState([]);
   const [collapsedCategories, setCollapsedCategories] = useState([]);
   const list = meals[viewDate] || [];
+
+  // Re-apply the time-based category whenever you land on today's view —
+  // e.g. switching tabs away and back, or paging the date nav back to today.
+  // Doesn't re-check continuously while sitting on the tab, so it won't yank
+  // you from Lunch to Dinner mid-entry just because the clock ticked past 4.
+  useEffect(() => {
+    if (viewDate === todayStr()) {
+      setActiveCategory(categoryForTime(new Date()));
+    }
+  }, [viewDate]);
 
   // Selecting items is a per-view action — clear the checkboxes whenever the
   // viewed day changes so stale selections from a previous day don't linger.

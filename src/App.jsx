@@ -1260,8 +1260,8 @@ export default function UltraTrainingApp() {
       const snapshot = buildCoachingSnapshot(mode, { raceDate, plan, currentWeek, runs, weightLogs, profile });
       const kickoffMessages = [{ role: "user", content: COACH_KICKOFF }];
       const { res, data } = await fetchCoachWithRetry({ mode, snapshot, messages: kickoffMessages });
-      if (!res.ok) {
-        setCoachError(data.error?.message || JSON.stringify(data.error) || "Coaching request failed.");
+      if (!res.ok || !data.reply || !data.reply.trim()) {
+        setCoachError((data.error && data.error.message) || JSON.stringify(data.error) || "The coach came back with an empty response — try again.");
         setCoachRetry({ mode, fn: "start" });
         return;
       }
@@ -1285,8 +1285,8 @@ export default function UltraTrainingApp() {
     try {
       const snapshot = buildCoachingSnapshot(mode, { raceDate, plan, currentWeek, runs, weightLogs, profile });
       const { res, data } = await fetchCoachWithRetry({ mode, snapshot, messages: updated });
-      if (!res.ok) {
-        setCoachError(data.error?.message || JSON.stringify(data.error) || "Coaching request failed.");
+      if (!res.ok || !data.reply || !data.reply.trim()) {
+        setCoachError((data.error && data.error.message) || JSON.stringify(data.error) || "The coach came back with an empty response — try again.");
         setCoachRetry({ mode, fn: "send", updated });
         return;
       }
@@ -1313,8 +1313,8 @@ export default function UltraTrainingApp() {
       try {
         const snapshot = buildCoachingSnapshot(coachRetry.mode, { raceDate, plan, currentWeek, runs, weightLogs, profile });
         const { res, data } = await fetchCoachWithRetry({ mode: coachRetry.mode, snapshot, messages: coachRetry.updated });
-        if (!res.ok) {
-          setCoachError(data.error?.message || JSON.stringify(data.error) || "Coaching request failed.");
+        if (!res.ok || !data.reply || !data.reply.trim()) {
+          setCoachError((data.error && data.error.message) || JSON.stringify(data.error) || "The coach came back with an empty response — try again.");
           return;
         }
         setCoachConversations((c) => ({ ...c, [coachRetry.mode]: [...coachRetry.updated, { role: "assistant", content: data.reply }] }));

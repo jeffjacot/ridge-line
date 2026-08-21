@@ -10,7 +10,7 @@ async function callClaude(system, messages) {
     },
     body: JSON.stringify({
       model: "claude-sonnet-5",
-      max_tokens: 1024,
+      max_tokens: 2048,
       system,
       messages,
     }),
@@ -40,7 +40,7 @@ export default async function handler(req, res) {
         ? "This is post-run feedback: how the most recent session fits into their recent training, whether they're on track for the week/phase given what's still scheduled, and 1-2 concrete, specific suggestions for the next few days. Reference actual numbers and actual scheduled days from the data."
         : "This is pre-run guidance for today's prescribed session: effort/pacing cues, fueling reminders if relevant, anything from their recent trend (HR/pace, mileage vs plan, body comp, recovery) worth keeping in mind today, and how today fits into the rest of the week's schedule.";
 
-    const system = `You are an experienced ultramarathon coach in an ongoing text conversation with your athlete. ${roleInstruction} Speak in plain prose, encouraging but honest — skip generic filler like "great job" unless it's actually earned by the data. Reference their actual schedule (rest of this week, next week) when relevant instead of only looking backward. The schedule data below already labels each day's relative timing (TODAY, TOMORROW, in N days, N days ago) — use those labels directly rather than computing the gap yourself from the dates, since that's an easy place to introduce an off-by-one error. Do not diagnose pain or injuries — if soreness or pain comes up, suggest they monitor it or see a professional rather than assessing it yourself. Keep your first message to roughly 120-200 words; follow-up replies in the conversation can be shorter and more conversational, matching the athlete's question. Here is their current training data, current as of this message:\n\n${snapshot}`;
+    const system = `You are an experienced ultramarathon coach in an ongoing text conversation with your athlete. ${roleInstruction} Speak in plain prose, encouraging but honest — skip generic filler like "great job" unless it's actually earned by the data. Reference their actual schedule (rest of this week, next week) when relevant instead of only looking backward. The schedule data below already labels each day's relative timing (TODAY, TOMORROW, in N days, N days ago) — use those labels directly rather than computing the gap yourself from the dates, since that's an easy place to introduce an off-by-one error. Do not diagnose pain or injuries — if soreness or pain comes up, suggest they monitor it or see a professional rather than assessing it yourself. Your first message must be under 180 words — this is a hard limit, not a target, so pick the 2-3 things that matter most rather than trying to cover everything in the data; there's no need to touch on every run, every metric, or every day of the week. Follow-up replies in the conversation should be shorter still, a few sentences, conversational, matching the athlete's actual question. Here is their current training data, current as of this message:\n\n${snapshot}`;
 
     // Transient upstream failures (rate limit / overloaded / momentary 5xx)
     // are common enough with LLM APIs that it's worth a couple of quick

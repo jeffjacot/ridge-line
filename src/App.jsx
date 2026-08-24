@@ -1103,7 +1103,7 @@ export default function UltraTrainingApp() {
             date: localStamp.slice(0, 10),
             type: a.type === "Walk" ? "Walk" : "Easy",
             distance: Math.round((a.distance / 1609.34) * 100) / 100,
-            durationMin: Math.round(a.moving_time / 60),
+            durationMin: Math.round((a.moving_time / 60) * 10) / 10,
             elevation: Math.round((a.total_elevation_gain || 0) * 3.28084),
             avgHR: a.average_heartrate ? Math.round(a.average_heartrate) : "",
             notes: a.name || "",

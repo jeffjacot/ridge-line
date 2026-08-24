@@ -2564,7 +2564,7 @@ function Nutrition({
   const [editMealId, setEditMealId] = useState(null);
   const [editMealForm, setEditMealForm] = useState(null);
   const [selectedIds, setSelectedIds] = useState([]);
-  const [collapsedCategories, setCollapsedCategories] = useState([]);
+  const [collapsedByDate, setCollapsedByDate] = useState({}); // { [date]: [category, ...] } — collapse state remembered per day, not reset on nav
   const list = meals[viewDate] || [];
 
   // Re-apply the time-based category whenever you land on today's view —
@@ -2579,14 +2579,20 @@ function Nutrition({
 
   // Selecting items is a per-view action — clear the checkboxes whenever the
   // viewed day changes so stale selections from a previous day don't linger.
-  // Collapsed sections reset too — start each day fresh and expanded.
+  // Collapsed sections are NOT reset here — each day keeps its own collapse
+  // state (see collapsedByDate above), so paging back to a day you were
+  // already looking at won't re-expand things you'd deliberately minimized.
   useEffect(() => {
     setSelectedIds([]);
-    setCollapsedCategories([]);
   }, [viewDate]);
 
+  const collapsedCategories = collapsedByDate[viewDate] || [];
   const toggleCollapsed = (category) => {
-    setCollapsedCategories((cats) => (cats.includes(category) ? cats.filter((c) => c !== category) : [...cats, category]));
+    setCollapsedByDate((byDate) => {
+      const current = byDate[viewDate] || [];
+      const next = current.includes(category) ? current.filter((c) => c !== category) : [...current, category];
+      return { ...byDate, [viewDate]: next };
+    });
   };
 
   const energy = useMemo(() => computeDayEnergy(viewDate, profile, plan, runs), [viewDate, profile, plan, runs]);

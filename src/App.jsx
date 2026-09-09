@@ -59,8 +59,8 @@ const PHASE_DEFS = [
   {
     name: "Build I",
     color: COLORS.amber,
-    longRun: [16, 23],
-    totalFactor: 2.8,
+    longRun: [16, 21],
+    totalFactor: 2.6,
     weights: { Mon: 0.15, Tue: 0.22, Thu: 0.18, Fri: 0.15, Sat: 0.3 },
     strengthDays: ["Tue", "Fri"],
     labels: { Tue: "Tempo / threshold", Fri: "Hill repeats (extended)" },
@@ -70,24 +70,28 @@ const PHASE_DEFS = [
   {
     name: "Build II",
     color: COLORS.amber,
-    longRun: [23, 27],
-    totalFactor: 2.4,
+    longRun: [20, 24],
+    totalFactor: 2.2,
     weights: { Mon: 0.12, Tue: 0.18, Thu: 0.4, Fri: 0.1, Sat: 0.2 },
     strengthDays: ["Fri"],
     labels: { Tue: "Tempo / threshold", Thu: "Back-to-Back Long Run", Fri: "Zone 2 easy (recovery)" },
     wedLabel: "Long Run — race-specific terrain",
-    focus: "Consecutive-day fatigue (Wed+Thu) to simulate late-race legs; fueling and gear rehearsal on long days",
+    focus: "Alternating weeks of Wed+Thu consecutive-day fatigue to simulate late-race legs, with an easier Thursday in between for recovery; fueling and gear rehearsal on the long days",
+    easyThuLabel: "Zone 2 easy (recovery)",
+    easyThuWeight: 0.15,
   },
   {
     name: "Peak",
     color: COLORS.rust,
-    longRun: [27, 31],
-    totalFactor: 2.2,
+    longRun: [24, 28],
+    totalFactor: 2.0,
     weights: { Mon: 0.1, Tue: 0.15, Thu: 0.45, Fri: 0.1, Sat: 0.2 },
     strengthDays: ["Fri"],
     labels: { Tue: "Tempo / threshold (race-pace)", Thu: "Back-to-Back Long Run (race simulation)", Fri: "Zone 2 easy (recovery)" },
     wedLabel: "Long Run — race simulation",
-    focus: "Highest volume and biggest back-to-back of the cycle, then sharp drop into taper",
+    focus: "Highest volume of the cycle, with back-to-back weeks alternating against easier weeks before a sharp drop into taper",
+    easyThuLabel: "Zone 2 easy (recovery)",
+    easyThuWeight: 0.18,
   },
 ];
 
@@ -203,7 +207,7 @@ function macrosForGrams(food, grams) {
   };
 }
 
-function buildDaySchedule(weekStartSunday, phaseDef, longRun, isCutback, reducedFreq) {
+function buildDaySchedule(weekStartSunday, phaseDef, longRun, isCutback, reducedFreq, isBackToBack = true) {
   const days = [];
   for (let i = 0; i < 7; i++) {
     const d = new Date(weekStartSunday);
@@ -225,6 +229,7 @@ function buildDaySchedule(weekStartSunday, phaseDef, longRun, isCutback, reduced
   // left untouched there even if the toggle is on.
   const canReduce = reducedFreq && (phaseDef.name === "Foundation" || phaseDef.name === "Build I");
   let weights = phaseDef.weights;
+  let labels = phaseDef.labels;
   if (canReduce) {
     weights = { ...phaseDef.weights };
     const thuWeight = weights.Thu || 0;
@@ -236,12 +241,20 @@ function buildDaySchedule(weekStartSunday, phaseDef, longRun, isCutback, reduced
     });
   }
 
+  // Alternate the back-to-back load in Build II/Peak — every other week
+  // swaps Thursday from a second long effort down to an easy recovery day
+  // instead of stacking a hard Wed+Thu combo every single week of the phase.
+  if (!isBackToBack && phaseDef.easyThuLabel) {
+    weights = { ...weights, Thu: phaseDef.easyThuWeight };
+    labels = { ...labels, Thu: phaseDef.easyThuLabel };
+  }
+
   Object.entries(weights).forEach(([short, weight]) => {
     const idx = SHORT_IDX[short];
     let miles = Math.round(nonLong * weight);
     if (miles < 2) miles = 2;
     days[idx].miles = miles;
-    days[idx].type = phaseDef.labels[short] || "Zone 2 easy";
+    days[idx].type = labels[short] || "Zone 2 easy";
     days[idx].strength = phaseDef.strengthDays.includes(short);
   });
   // Thursday, when dropped, keeps its default { type: "Rest", miles: 0 } from above.
@@ -332,7 +345,11 @@ function buildPlan(raceDateStr, planStartDateStr, reducedFreq) {
       const isCutback = i > 0 && (i + 1) % 4 === 0;
       const longRun = Math.round(isCutback ? longRunRaw * 0.75 : longRunRaw);
       if (def.name === "Peak") peakLongRunSeen = Math.max(peakLongRunSeen, longRun);
-      const days = buildDaySchedule(weekStart, def, longRun, isCutback, reducedFreq);
+      // Alternate back-to-back weeks in Build II/Peak instead of firing every
+      // week — every other week gets the harder Wed+Thu combo, the weeks in
+      // between (and cutback weeks, always) get a normal easy Thursday.
+      const isBackToBack = !isCutback && i % 2 === 0;
+      const days = buildDaySchedule(weekStart, def, longRun, isCutback, reducedFreq, isBackToBack);
       const totalMiles = days.reduce((s, d) => s + (d.miles || 0), 0);
       weeks.push({
         week: weekCursor + 1,
@@ -2220,7 +2237,7 @@ function PlanView({ plan }) {
     <Card>
       <Eyebrow>Periodization · starts {fmtShort(plan.startDate)} · race {plan.raceDate}</Eyebrow>
       <div style={{ color: COLORS.inkSoft, fontSize: 12, marginBottom: 12 }}>
-        Sunday is always off. Long run is Wednesday. During Build II and Peak, Thursday becomes a back-to-back long effort (next-day fatigue, closer to real race legs). Every 4th week is a cutback — volume drops ~25-30% to let the adaptation land.
+        Sunday is always off. Long run is Wednesday. During Build II and Peak, Thursday alternates: every other week becomes a back-to-back long effort (next-day fatigue, closer to real race legs), with an easy recovery day on the weeks in between. Every 4th week is also a cutback — volume drops ~25-30% to let the adaptation land.
       </div>
       <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>

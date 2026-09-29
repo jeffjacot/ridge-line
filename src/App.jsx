@@ -403,6 +403,79 @@ function buildPlan(raceDateStr, planStartDateStr, reducedFreq) {
   return { raceDate: raceDateStr, startDate: fmtDate(planStart), weeks };
 }
 
+// ---------- heel recovery overlay ----------
+// Applied on top of an already-generated plan, not baked into buildPlan
+// itself — this way it works no matter which phase the athlete is in when
+// pain shows up, without having to re-derive the whole periodization model.
+// Deload weeks: running volume cut hard, and specifically the highest-impact
+// sessions (hills, tempo/threshold, back-to-back long efforts) are swapped
+// out for low-impact cross-training instead of just shortened, since those
+// are the sessions that load the heel most. Easy days and the long run stay
+// as (much smaller) runs rather than disappearing entirely, so some
+// running-specific adaptation is preserved. Ramp weeks after that rebuild
+// volume over two weeks rather than jumping straight back to the plan.
+// Taper and Race Week are never touched — those protect race readiness and
+// by the time either arrives the recovery window should be long past.
+const RECOVERY_HARD_PATTERN = /Hill|Back-to-Back|Tempo|threshold|race-pace|race simulation/i;
+const RECOVERY_RAMP_WEEKS = 2;
+
+function deloadWeek(w, weekNum, totalDeload) {
+  const mult = 0.4; // running volume held to ~40% of what was planned
+  const days = w.days.map((d) => {
+    if (!d.miles || d.miles <= 0) return d;
+    if (RECOVERY_HARD_PATTERN.test(d.type)) {
+      return { ...d, miles: 0, type: "Cross-train — bike/swim/elliptical, 30-45 min easy (heel deload, swapped from a high-impact session)" };
+    }
+    const reduced = Math.max(0, Math.round(d.miles * mult));
+    if (/Long Run/i.test(d.type)) {
+      return { ...d, miles: reduced, type: `${d.type} — shortened, low impact` };
+    }
+    return { ...d, miles: reduced, type: `${d.type} (reduced for heel deload)` };
+  });
+  const totalMiles = days.reduce((s, d) => s + (d.miles || 0), 0);
+  return {
+    ...w,
+    days,
+    totalMiles,
+    focus: `Heel recovery — deload week ${weekNum} of ${totalDeload}. Running volume cut hard and hills/tempo/back-to-back efforts swapped for low-impact cross-training (bike, swim, or elliptical) to protect the heel while holding aerobic fitness. If it's still sore during runs at this reduced load, that's worth getting looked at rather than pushing through.`,
+    isRecovery: true,
+  };
+}
+
+function rampWeek(w, weekNum, totalRamp) {
+  const mults = [0.65, 0.85];
+  const mult = mults[weekNum - 1] ?? 0.9;
+  const days = w.days.map((d) => {
+    if (!d.miles || d.miles <= 0) return d;
+    const miles = Math.max(0, Math.round(d.miles * mult));
+    return { ...d, miles, type: `${d.type} (ease-back wk ${weekNum})` };
+  });
+  const totalMiles = days.reduce((s, d) => s + (d.miles || 0), 0);
+  return {
+    ...w,
+    days,
+    totalMiles,
+    focus: `Ease back in — week ${weekNum} of ${totalRamp} rebuilding toward full volume after the heel deload. Keep listening to the heel; if soreness comes back, it's better to extend the deload than push through this ramp.`,
+    isRecovery: true,
+  };
+}
+
+function applyRecoveryOverlay(weeks, recovery) {
+  if (!recovery || !recovery.active || !recovery.startDate) return weeks;
+  const deloadWeeks = Math.max(1, Number(recovery.length) || 2);
+  const start = mondayOf(new Date(recovery.startDate + "T00:00:00"));
+  return weeks.map((w) => {
+    if (w.phase === "Race Week" || w.phase === "Taper") return w;
+    const wkStart = new Date(w.start + "T00:00:00");
+    const offsetWeeks = Math.round(daysBetween(start, wkStart) / 7);
+    if (offsetWeeks < 0) return w;
+    if (offsetWeeks < deloadWeeks) return deloadWeek(w, offsetWeeks + 1, deloadWeeks);
+    const rampIdx = offsetWeeks - deloadWeeks;
+    if (rampIdx < RECOVERY_RAMP_WEEKS) return rampWeek(w, rampIdx + 1, RECOVERY_RAMP_WEEKS);
+    return w;
+  });
+}
+
 // Works out the calorie target, activity estimate, deficit, and prescribed
 // session for ANY date — not just today — so both the Dashboard (today) and
 // the Nutrition tab (any day you're looking back at) can share one source
@@ -524,6 +597,9 @@ function buildCoachingSnapshot(mode, { raceDate, plan, currentWeek, runs, weight
 
   const todayDow = new Date(today + "T00:00:00").toLocaleDateString("en-US", { weekday: "long" });
   let snapshot = `Today's date is ${today} (${todayDow}). Training for a 50-mile ultramarathon, race in ${daysToRace} days (${raceDate}). Currently in ${currentWeek.phase} phase, week ${currentWeek.week} of ${plan.weeks.length}${currentWeek.isCutback ? " (cutback week — volume intentionally reduced)" : ""}.\n\n`;
+  if (currentWeek.isRecovery) {
+    snapshot += `This athlete is dealing with left heel pain (manageable — sore during/after running but walking is fine; not currently seeking medical care unless it worsens) and the schedule shown below has already been automatically adjusted for it: volume is cut and high-impact sessions are swapped for cross-training. Don't re-suggest cutting volume or backing off — that's already built into the schedule you're seeing. Focus on how the heel is responding, cross-training execution, and whether the deload/ramp pace still looks right.\n\n`;
+  }
   snapshot += `This week's full schedule (Mon–Sun), with actuals filled in for days already passed:\n${weekScheduleLines}\n\n`;
   if (nextWeek) {
     snapshot += `Next week (week ${nextWeek.week}): ${nextWeek.phase} phase${nextWeek.isCutback ? ", cutback" : ""}, ${nextWeek.totalMiles} mi planned, long run ${nextWeek.longRun} mi.\n\n`;
@@ -939,7 +1015,7 @@ export default function UltraTrainingApp() {
   const [tab, setTab] = useState("dashboard");
   const [raceDate, setRaceDate] = useState("2027-01-30");
   const [planStartDate, setPlanStartDate] = useState("2026-07-27");
-  const [profile, setProfile] = useState({ baseTDEE: 2400, weightLb: "", weightLossMode: false, deficitKcal: 400, reducedFrequency: false, usdaApiKey: "", withingsClientId: "" });
+  const [profile, setProfile] = useState({ baseTDEE: 2400, weightLb: "", weightLossMode: false, deficitKcal: 400, reducedFrequency: false, recoveryMode: false, recoveryStartDate: "", recoveryLength: 2, usdaApiKey: "", withingsClientId: "" });
   const [runs, setRuns] = useState([]);
   const [strengthLogs, setStrengthLogs] = useState([]);
   const [meals, setMeals] = useState({}); // { 'YYYY-MM-DD': [ {id,name,cal,protein,carbs,fat} ] }
@@ -963,7 +1039,7 @@ export default function UltraTrainingApp() {
     (async () => {
       const rd = await loadJSON("race-date", "2027-01-30");
       const psd = await loadJSON("plan-start-date", "2026-07-27");
-      const pr = await loadJSON("profile", { baseTDEE: 2400, weightLb: "", weightLossMode: false, deficitKcal: 400, reducedFrequency: false, usdaApiKey: "", withingsClientId: "" });
+      const pr = await loadJSON("profile", { baseTDEE: 2400, weightLb: "", weightLossMode: false, deficitKcal: 400, reducedFrequency: false, recoveryMode: false, recoveryStartDate: "", recoveryLength: 2, usdaApiKey: "", withingsClientId: "" });
       const rn = await loadJSON("runs", []);
       const sl = await loadJSON("strength-logs", []);
       const ml = await loadJSON("meals", {});
@@ -1238,7 +1314,16 @@ export default function UltraTrainingApp() {
     }
   };
 
-  const plan = useMemo(() => buildPlan(raceDate, planStartDate, profile.reducedFrequency), [raceDate, planStartDate, profile.reducedFrequency]);
+  const plan = useMemo(() => {
+    const base = buildPlan(raceDate, planStartDate, profile.reducedFrequency);
+    const weeks = applyRecoveryOverlay(base.weeks, {
+      active: profile.recoveryMode,
+      startDate: profile.recoveryStartDate,
+      length: profile.recoveryLength,
+    });
+    return { ...base, weeks };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [raceDate, planStartDate, profile.reducedFrequency, profile.recoveryMode, profile.recoveryStartDate, profile.recoveryLength]);
   const daysToRace = daysBetween(new Date(todayStr() + "T00:00:00"), new Date(raceDate + "T00:00:00"));
   const weeksToRace = Math.max(0, Math.ceil(daysToRace / 7));
 
@@ -1741,7 +1826,7 @@ function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalor
           })}
         </div>
         <div style={{ color: COLORS.inkSoft, fontSize: 11, marginTop: 8 }}>
-          {currentWeek.isCutback ? "Cutback week. " : ""}{reducedFrequency && (currentWeek.phase === "Foundation" || currentWeek.phase === "Build I") ? "5-day mode active." : ""}
+          {currentWeek.isRecovery ? "Heel recovery active — schedule adjusted. " : ""}{currentWeek.isCutback ? "Cutback week. " : ""}{reducedFrequency && (currentWeek.phase === "Foundation" || currentWeek.phase === "Build I") ? "5-day mode active." : ""}
         </div>
       </Card>
 
@@ -3143,6 +3228,62 @@ function Settings({
         </label>
         <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 10, lineHeight: 1.6 }}>
           Drops Thursday to a full rest day in Foundation and Build I (that day's mileage gets redistributed across Mon/Tue/Fri/Sat, not just deleted), and slows how fast the long run grows week to week during those two phases. Doesn't touch Build II or Peak, since Thursday there is the deliberate back-to-back long effort — too load-bearing to drop. Flip this on or off any week; the plan rebuilds immediately either way.
+        </div>
+      </Card>
+      <Card>
+        <Eyebrow>Heel recovery</Eyebrow>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: COLORS.ink, cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            checked={!!profile.recoveryMode}
+            onChange={(e) => {
+              const on = e.target.checked;
+              setProfile({
+                ...profile,
+                recoveryMode: on,
+                recoveryStartDate: on && !profile.recoveryStartDate ? todayStr() : profile.recoveryStartDate,
+              });
+            }}
+          />
+          Heel recovery mode
+        </label>
+        {profile.recoveryMode && (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, maxWidth: 400, marginTop: 12 }}>
+            <div>
+              <label style={{ fontSize: 12, color: COLORS.inkSoft }}>Start date</label>
+              <Input
+                type="date"
+                value={profile.recoveryStartDate || todayStr()}
+                onChange={(e) => setProfile({ ...profile, recoveryStartDate: e.target.value })}
+                style={{ marginTop: 4 }}
+              />
+            </div>
+            <div>
+              <label style={{ fontSize: 12, color: COLORS.inkSoft }}>Deload length</label>
+              <select
+                value={profile.recoveryLength || 2}
+                onChange={(e) => setProfile({ ...profile, recoveryLength: Number(e.target.value) })}
+                style={{
+                  marginTop: 4,
+                  width: "100%",
+                  background: COLORS.raised,
+                  color: COLORS.ink,
+                  border: `1px solid ${COLORS.line}`,
+                  borderRadius: 6,
+                  padding: "8px 10px",
+                  fontSize: 13,
+                }}
+              >
+                <option value={1}>1 week</option>
+                <option value={2}>2 weeks</option>
+                <option value={3}>3 weeks</option>
+                <option value={4}>4 weeks</option>
+              </select>
+            </div>
+          </div>
+        )}
+        <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 10, lineHeight: 1.6 }}>
+          For the deload weeks starting on the date above, running volume drops to roughly 40% of plan, and the highest-impact sessions — hill repeats, tempo/threshold, back-to-back long efforts — swap out entirely for low-impact cross-training (bike, swim, or elliptical) instead of just shorter runs, since those are the sessions that load the heel hardest. The long run and easy days stay as smaller runs rather than disappearing. After the deload window, the plan doesn't jump straight back to full volume — it ramps back up over 2 more weeks before rejoining your normal schedule. Taper and Race Week are never touched. Flip this off anytime to go back to the normal plan immediately.
         </div>
       </Card>
       <Card>

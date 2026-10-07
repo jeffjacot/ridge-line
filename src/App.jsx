@@ -553,6 +553,9 @@ function buildCoachingSnapshot(mode, { raceDate, plan, currentWeek, runs, weight
         r.tempF != null
           ? `, ${r.tempF}°F${r.humidityPct != null ? `/${r.humidityPct}% humidity` : ""}${r.heatIndexF != null ? ` (heat index ${r.heatIndexF}°F)` : ""}`
           : "";
+      if (r.type === "Bike") {
+        return `${r.date} — Bike (cross-training, indoor/Peloton), ${r.durationMin || 0} min${r.avgHR ? `, avg HR ${r.avgHR}` : ""}${r.calories ? `, ${r.calories} cal` : ""}`;
+      }
       return `${r.date} — ${r.type}, ${r.distance || 0} mi, ${r.durationMin || 0} min, pace ${paceStr}${r.avgHR ? `, avg HR ${r.avgHR}` : ""}${Number(r.elevation) > 0 ? `, ${r.elevation} ft gain` : ""}${weatherStr}`;
     })
     .join("\n");
@@ -1226,7 +1229,25 @@ export default function UltraTrainingApp() {
           return entry;
         })
       );
-      if (newRuns.length > 0) setRuns([...newRuns, ...runs]);
+      // Peloton (and other indoor/outdoor cycling) rides land in Strava as
+      // "Ride" or "VirtualRide" — logged here as cross-training. Distance is
+      // intentionally left at 0 (bike mileage isn't run mileage), so these
+      // never inflate weekly run volume or the HR/elevation progress charts
+      // (filtered out alongside Walk entries wherever those are excluded).
+      const newBikeActivities = (data.activities || []).filter((a) => (a.type === "Ride" || a.type === "VirtualRide") && !existingIds.has(a.id));
+      const newBikeRuns = newBikeActivities.map((a) => ({
+        id: uid(),
+        stravaId: a.id,
+        date: (a.start_date_local || a.start_date || "").slice(0, 10),
+        type: "Bike",
+        distance: 0,
+        durationMin: Math.round((a.moving_time / 60) * 10) / 10,
+        elevation: 0,
+        avgHR: a.average_heartrate ? Math.round(a.average_heartrate) : "",
+        calories: a.calories ? Math.round(a.calories) : a.kilojoules ? Math.round(a.kilojoules) : "",
+        notes: a.name || "",
+      }));
+      if (newRuns.length > 0 || newBikeRuns.length > 0) setRuns([...newRuns, ...newBikeRuns, ...runs]);
 
       const existingStrengthIds = new Set(strengthLogs.map((s) => s.stravaId).filter(Boolean));
       const newStrength = (data.activities || [])
@@ -1243,7 +1264,7 @@ export default function UltraTrainingApp() {
         }));
       if (newStrength.length > 0) setStrengthLogs([...newStrength, ...strengthLogs]);
 
-      const totalNew = newRuns.length + newStrength.length;
+      const totalNew = newRuns.length + newBikeRuns.length + newStrength.length;
       const updatedAuth = { ...stravaAuth, accessToken: data.access_token, refreshToken: data.refresh_token, expiresAt: data.expires_at, lastSyncAt: new Date().toISOString() };
       setStravaAuth(updatedAuth);
       setStravaSyncStatus(totalNew > 0 ? `Synced ${totalNew} new session${totalNew !== 1 ? "s" : ""}.` : "Up to date — nothing new.");
@@ -1448,7 +1469,7 @@ export default function UltraTrainingApp() {
     return runs
       .filter((r) => {
         const d = new Date(r.date + "T00:00:00");
-        return d >= wkStart && d < wkEnd;
+        return d >= wkStart && d < wkEnd && r.type !== "Bike"; // bike miles aren't run miles — tracked, but kept out of weekly run volume
       })
       .reduce((s, r) => s + Number(r.distance || 0), 0);
   }, [runs, currentWeek]);
@@ -1897,7 +1918,7 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, stravaAuth,
     return `${min}:${sec.toString().padStart(2, "0")}/mi`;
   };
 
-  const runTypeOptions = ["Easy", "Long Run", "Tempo", "Hill/Vert", "Back-to-Back", "Race Sim", "Walk"];
+  const runTypeOptions = ["Easy", "Long Run", "Tempo", "Hill/Vert", "Back-to-Back", "Race Sim", "Walk", "Bike"];
 
   const dayRuns = runs.filter((r) => r.date === viewDate);
   const dayStrength = strengthLogs.filter((s) => s.date === viewDate);
@@ -1980,11 +2001,21 @@ function TrainingLog({ runs, setRuns, strengthLogs, setStrengthLogs, stravaAuth,
                     {r.stravaId && <span style={{ color: COLORS.amber, fontSize: 11, fontWeight: 400 }}> · Strava</span>}
                   </div>
                   <div style={{ color: COLORS.inkSoft, fontSize: 12 }}>
-                    {r.distance || 0} mi · {r.durationMin || 0} min · {pace(r)}
-                    {Number(r.elevation) > 0 ? ` · ${r.elevation} ft gain` : ""}
-                    {r.avgHR ? ` · ${r.avgHR} bpm` : ""}
-                    {r.tempF != null ? ` · ${r.tempF}°F${r.humidityPct != null ? `/${r.humidityPct}%` : ""}` : ""}
-                    {r.heatIndexF != null ? ` (feels ${r.heatIndexF}°F)` : ""}
+                    {r.type === "Bike" ? (
+                      <>
+                        {r.durationMin || 0} min
+                        {r.avgHR ? ` · ${r.avgHR} bpm` : ""}
+                        {r.calories ? ` · ${r.calories} cal` : ""}
+                      </>
+                    ) : (
+                      <>
+                        {r.distance || 0} mi · {r.durationMin || 0} min · {pace(r)}
+                        {Number(r.elevation) > 0 ? ` · ${r.elevation} ft gain` : ""}
+                        {r.avgHR ? ` · ${r.avgHR} bpm` : ""}
+                        {r.tempF != null ? ` · ${r.tempF}°F${r.humidityPct != null ? `/${r.humidityPct}%` : ""}` : ""}
+                        {r.heatIndexF != null ? ` (feels ${r.heatIndexF}°F)` : ""}
+                      </>
+                    )}
                   </div>
                   {r.notes && <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 2 }}>{r.notes}</div>}
                 </div>
@@ -2081,10 +2112,11 @@ function Progress({ plan, currentWeek, runs, strengthLogs, weightLogs, withingsA
           const d = new Date(r.date + "T00:00:00");
           return d >= wkStart && d < wkEnd;
         });
-        // Miles include walks (they count toward weekly volume); elevation
-        // excludes walks — that chart is about trained vert, not strolling.
-        const actualMiles = weekRuns.reduce((s, r) => s + Number(r.distance || 0), 0);
-        const actualVert = weekRuns.filter((r) => r.type !== "Walk").reduce((s, r) => s + Number(r.elevation || 0), 0);
+        // Miles include walks (they count toward weekly volume) but not bike
+        // rides (cross-training, not run mileage); elevation excludes both
+        // walks and rides — that chart is about trained running vert.
+        const actualMiles = weekRuns.filter((r) => r.type !== "Bike").reduce((s, r) => s + Number(r.distance || 0), 0);
+        const actualVert = weekRuns.filter((r) => r.type !== "Walk" && r.type !== "Bike").reduce((s, r) => s + Number(r.elevation || 0), 0);
         return { week: `Wk ${w.week}`, planned: w.totalMiles, actual: Math.round(actualMiles * 10) / 10, vert: Math.round(actualVert) };
       });
   }, [plan, currentWeek, runs]);
@@ -2107,7 +2139,7 @@ function Progress({ plan, currentWeek, runs, strengthLogs, weightLogs, withingsA
 
   const hrPaceTrend = useMemo(() => {
     return runs
-      .filter((r) => r.type !== "Walk" && Number(r.distance) > 0 && Number(r.durationMin) > 0 && Number(r.avgHR) > 0)
+      .filter((r) => r.type !== "Walk" && r.type !== "Bike" && Number(r.distance) > 0 && Number(r.durationMin) > 0 && Number(r.avgHR) > 0)
       .slice()
       .sort((a, b) => new Date(a.date) - new Date(b.date))
       .map((r) => ({

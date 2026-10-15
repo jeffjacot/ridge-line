@@ -2533,6 +2533,44 @@ function BarcodeScanner({ onDetected, onClose }) {
   const videoRef = React.useRef(null);
   const [status, setStatus] = useState("Starting camera…");
   const [manual, setManual] = useState("");
+  const photoRef = React.useRef(null);
+
+  // iPhone fallback/alternative: take a photo with the regular camera (sharp,
+  // autofocused, full resolution) and decode that, instead of reading blurry
+  // live video frames.
+  const handlePhoto = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setStatus("Reading the photo…");
+    try {
+      const ZX = await loadZxing();
+      const dataUrl = await new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => {
+          const maxW = 1800;
+          const scale = Math.min(1, maxW / Math.max(img.width, img.height));
+          const c = document.createElement("canvas");
+          c.width = Math.round(img.width * scale);
+          c.height = Math.round(img.height * scale);
+          c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+          URL.revokeObjectURL(url);
+          resolve(c.toDataURL("image/jpeg", 0.92));
+        };
+        img.onerror = () => reject(new Error("Couldn't open that photo"));
+        img.src = url;
+      });
+      const hints = new Map();
+      hints.set(ZX.DecodeHintType.POSSIBLE_FORMATS, [ZX.BarcodeFormat.EAN_13, ZX.BarcodeFormat.UPC_A, ZX.BarcodeFormat.UPC_E, ZX.BarcodeFormat.EAN_8]);
+      hints.set(ZX.DecodeHintType.TRY_HARDER, true);
+      const r = new ZX.BrowserMultiFormatReader(hints);
+      const result = await r.decodeFromImageUrl(dataUrl);
+      onDetected(result.getText());
+    } catch (err) {
+      setStatus("Couldn't find a barcode in that photo. Get closer so the bars fill most of the frame, keep it flat and sharp, avoid glare, and try again — or type the number below.");
+    }
+  };
 
   useEffect(() => {
     let reader = null;
@@ -2623,6 +2661,10 @@ function BarcodeScanner({ onDetected, onClose }) {
           <div style={{ position: "absolute", left: "10%", right: "10%", top: "50%", height: 2, background: COLORS.rust, opacity: 0.85 }} />
         </div>
         <div style={{ color: COLORS.inkSoft, fontSize: 12.5, margin: "10px 0", lineHeight: 1.5 }}>{status}</div>
+        <input ref={photoRef} type="file" accept="image/*" capture="environment" onChange={handlePhoto} style={{ display: "none" }} />
+        <Button onClick={() => photoRef.current && photoRef.current.click()} style={{ width: "100%", marginBottom: 10 }}>
+          Take a photo of the barcode instead
+        </Button>
         <div style={{ display: "flex", gap: 8 }}>
           <Input placeholder="Or type the barcode number" inputMode="numeric" value={manual} onChange={(e) => setManual(e.target.value)} />
           <Button onClick={() => manual.trim() && onDetected(manual.trim())} style={{ whiteSpace: "nowrap" }}>Look up</Button>

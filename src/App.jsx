@@ -2404,7 +2404,181 @@ function PlanView({ plan }) {
   );
 }
 
+// ---------- barcode scanning ----------
+// Lookup order: USDA Branded Foods (searched by UPC, uses the same API key as
+// food search — best US grocery coverage) first, then Open Food Facts (free,
+// no key, crowdsourced, covers a lot USDA misses). Both report nutrients per
+// 100g, so results drop straight into the existing portion-rescaling flow.
+const titleCase = (s) => String(s || "").toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase());
+
+async function lookupBarcode(rawCode, usdaApiKey) {
+  const code = String(rawCode || "").replace(/\D/g, "");
+  if (code.length < 6) return { food: null, error: "That doesn't look like a valid barcode number." };
+  const stripped = code.replace(/^0+/, "");
+  let sawNetworkError = false;
+
+  if (usdaApiKey) {
+    try {
+      const params = new URLSearchParams();
+      params.set("api_key", usdaApiKey.trim());
+      params.set("query", code);
+      params.set("pageSize", "10");
+      const res = await fetch(`https://api.nal.usda.gov/fdc/v1/foods/search?${params.toString()}`);
+      if (res.ok) {
+        const data = await res.json();
+        const item = (data.foods || []).find((f) => String(f.gtinUpc || "").replace(/^0+/, "") === stripped);
+        if (item) {
+          const nutrients = item.foodNutrients || [];
+          const byId = (id) => {
+            const n = nutrients.find((x) => x.nutrientId === id);
+            return n ? Number(n.value) || 0 : 0;
+          };
+          const kcalEntry = nutrients.find((x) => x.nutrientId === 1008 && String(x.unitName || "").toUpperCase() === "KCAL") || nutrients.find((x) => x.nutrientId === 1008);
+          const food = {
+            name: titleCase(item.description) + (item.brandName || item.brandOwner ? ` — ${titleCase(item.brandName || item.brandOwner)}` : ""),
+            cal: Math.round(kcalEntry ? Number(kcalEntry.value) || 0 : 0),
+            protein: Math.round(byId(1003) * 10) / 10,
+            carbs: Math.round(byId(1005) * 10) / 10,
+            fat: Math.round(byId(1004) * 10) / 10,
+            isOnline: true,
+            sourceLabel: "USDA",
+          };
+          const unit = String(item.servingSizeUnit || "").toLowerCase();
+          if (item.servingSize && (unit === "g" || unit === "grm")) food.servingGrams = Number(item.servingSize);
+          if (food.cal > 0 || food.protein + food.carbs + food.fat > 0) return { food };
+        }
+      } else {
+        sawNetworkError = true;
+      }
+    } catch (e) {
+      sawNetworkError = true;
+    }
+  }
+
+  const candidates = [...new Set([code.length === 12 ? code.padStart(13, "0") : code, code])];
+  for (const c of candidates) {
+    try {
+      const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${c}.json?fields=product_name,brands,nutriments,serving_quantity`);
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (data.status !== 1 || !data.product) continue;
+      const n = data.product.nutriments || {};
+      const kcal = n["energy-kcal_100g"] != null ? Number(n["energy-kcal_100g"]) : n["energy_100g"] != null ? Number(n["energy_100g"]) / 4.184 : 0;
+      const food = {
+        name: (data.product.product_name || "Scanned item") + (data.product.brands ? ` — ${String(data.product.brands).split(",")[0].trim()}` : ""),
+        cal: Math.round(kcal || 0),
+        protein: Math.round((Number(n["proteins_100g"]) || 0) * 10) / 10,
+        carbs: Math.round((Number(n["carbohydrates_100g"]) || 0) * 10) / 10,
+        fat: Math.round((Number(n["fat_100g"]) || 0) * 10) / 10,
+        isOnline: true,
+        sourceLabel: "Open Food Facts",
+      };
+      const sq = Number(data.product.serving_quantity);
+      if (sq > 0) food.servingGrams = sq;
+      if (food.cal > 0 || food.protein + food.carbs + food.fat > 0) return { food };
+    } catch (e) {
+      sawNetworkError = true;
+    }
+  }
+  return { food: null, error: sawNetworkError ? "Couldn't reach the food databases — check your connection and try again." : null };
+}
+
+let zxingLoadPromise = null;
+function loadZxing() {
+  if (typeof window !== "undefined" && window.ZXing) return Promise.resolve(window.ZXing);
+  if (zxingLoadPromise) return zxingLoadPromise;
+  const sources = [
+    "https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js",
+    "https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js",
+  ];
+  zxingLoadPromise = new Promise((resolve, reject) => {
+    const tryNext = (i) => {
+      if (i >= sources.length) {
+        zxingLoadPromise = null;
+        reject(new Error("Couldn't load the scanner library"));
+        return;
+      }
+      const s = document.createElement("script");
+      s.src = sources[i];
+      s.onload = () => (window.ZXing ? resolve(window.ZXing) : tryNext(i + 1));
+      s.onerror = () => tryNext(i + 1);
+      document.head.appendChild(s);
+    };
+    tryNext(0);
+  });
+  return zxingLoadPromise;
+}
+
+function BarcodeScanner({ onDetected, onClose }) {
+  const videoRef = React.useRef(null);
+  const [status, setStatus] = useState("Starting camera…");
+  const [manual, setManual] = useState("");
+
+  useEffect(() => {
+    let reader = null;
+    let cancelled = false;
+    let fired = false;
+    (async () => {
+      try {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error("no-camera");
+        }
+        const ZX = await loadZxing();
+        if (cancelled) return;
+        const hints = new Map();
+        hints.set(ZX.DecodeHintType.POSSIBLE_FORMATS, [ZX.BarcodeFormat.EAN_13, ZX.BarcodeFormat.UPC_A, ZX.BarcodeFormat.UPC_E, ZX.BarcodeFormat.EAN_8]);
+        hints.set(ZX.DecodeHintType.TRY_HARDER, true);
+        reader = new ZX.BrowserMultiFormatReader(hints, 250);
+        setStatus("Point the camera at the barcode");
+        await reader.decodeFromConstraints(
+          { video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } } },
+          videoRef.current,
+          (result) => {
+            if (result && !fired) {
+              fired = true;
+              onDetected(result.getText());
+            }
+          }
+        );
+      } catch (e) {
+        if (cancelled) return;
+        const msg = String((e && (e.name || e.message)) || "");
+        if (/NotAllowed|Permission/i.test(msg)) setStatus("Camera access was blocked. Allow it in your phone's settings for this app, or type the number below.");
+        else if (/scanner library/i.test(String(e && e.message))) setStatus("Couldn't load the scanner. Check your connection, or type the number below.");
+        else setStatus("Couldn't start the camera. You can type the barcode number below instead.");
+      }
+    })();
+    return () => {
+      cancelled = true;
+      try {
+        if (reader) reader.reset();
+      } catch (e) {}
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.88)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.line}`, borderRadius: 10, padding: 16, width: "100%", maxWidth: 440 }}>
+        <div style={{ position: "relative", borderRadius: 8, overflow: "hidden", background: "#000", aspectRatio: "4 / 3" }}>
+          <video ref={videoRef} playsInline muted autoPlay style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+          <div style={{ position: "absolute", left: "10%", right: "10%", top: "50%", height: 2, background: COLORS.rust, opacity: 0.85 }} />
+        </div>
+        <div style={{ color: COLORS.inkSoft, fontSize: 12.5, margin: "10px 0", lineHeight: 1.5 }}>{status}</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <Input placeholder="Or type the barcode number" inputMode="numeric" value={manual} onChange={(e) => setManual(e.target.value)} />
+          <Button onClick={() => manual.trim() && onDetected(manual.trim())} style={{ whiteSpace: "nowrap" }}>Look up</Button>
+        </div>
+        <Button variant="ghost" onClick={onClose} style={{ marginTop: 12 }}>Cancel</Button>
+      </div>
+    </div>
+  );
+}
+
 function FoodSearch({ onAdd, usdaApiKey, customFoods }) {
+  const [scanOpen, setScanOpen] = useState(false);
+  const [scanBusy, setScanBusy] = useState(false);
+  const [scanMsg, setScanMsg] = useState(null);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(null);
   const [unit, setUnit] = useState("oz");
@@ -2451,12 +2625,36 @@ function FoodSearch({ onAdd, usdaApiKey, customFoods }) {
     setAmount("100");
   };
 
+  const handleScanned = async (code) => {
+    setScanOpen(false);
+    setScanBusy(true);
+    setScanMsg(null);
+    const { food, error } = await lookupBarcode(code, usdaApiKey);
+    setScanBusy(false);
+    if (food) {
+      setQuery("");
+      setUsdaResults([]);
+      setUsdaSearchedFor(null);
+      setUsdaError(null);
+      setSelected(food);
+      if (food.servingGrams) {
+        setUnit("serving");
+        setAmount("1");
+      } else {
+        setUnit("g");
+        setAmount("100");
+      }
+    } else {
+      setScanMsg(error || `Barcode ${String(code).replace(/\D/g, "")} isn't in the USDA or Open Food Facts databases. Search it by name instead, or add it as a custom food.`);
+    }
+  };
+
   const grams = selected ? gramsForUnit(selected, unit, amount) : 0;
   const macros = selected ? macrosForGrams(selected, grams) : null;
 
   const add = () => {
     if (!selected || !amount) return;
-    const baseName = `${selected.name}${selected.isOnline ? " (USDA)" : ""}`;
+    const baseName = `${selected.name}${selected.isOnline ? ` (${selected.sourceLabel || "USDA"})` : ""}`;
     const label = `${amount} ${unit}${Number(amount) !== 1 ? (unit === "serving" ? "s" : "") : ""} ${baseName}`;
     const entry = {
       name: label,
@@ -2541,17 +2739,26 @@ function FoodSearch({ onAdd, usdaApiKey, customFoods }) {
   return (
     <Card>
       <Eyebrow>Search foods</Eyebrow>
-      <Input
-        placeholder="e.g. chicken breast, white rice, butter…"
-        value={query}
-        onChange={(e) => {
-          setQuery(e.target.value);
-          setSelected(null);
-          setUsdaResults([]);
-          setUsdaSearchedFor(null);
-          setUsdaError(null);
-        }}
-      />
+      {scanOpen && <BarcodeScanner onDetected={handleScanned} onClose={() => setScanOpen(false)} />}
+      <div style={{ display: "flex", gap: 8 }}>
+        <Input
+          placeholder="e.g. chicken breast, white rice, butter…"
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setSelected(null);
+            setUsdaResults([]);
+            setUsdaSearchedFor(null);
+            setUsdaError(null);
+            setScanMsg(null);
+          }}
+        />
+        <Button variant="ghost" onClick={() => { setScanMsg(null); setScanOpen(true); }} style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
+          Scan barcode
+        </Button>
+      </div>
+      {scanBusy && <div style={{ color: COLORS.inkSoft, fontSize: 12.5, marginTop: 8 }}>Looking up barcode…</div>}
+      {scanMsg && <div style={{ color: COLORS.rust, fontSize: 12.5, marginTop: 8 }}>{scanMsg}</div>}
       {results.length > 0 && (
         <div style={{ marginTop: 8, border: `1px solid ${COLORS.line}`, borderRadius: 6, overflow: "hidden" }}>
           {results.map((f) => (
@@ -2587,7 +2794,7 @@ function FoodSearch({ onAdd, usdaApiKey, customFoods }) {
         <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${COLORS.line}` }}>
           <div style={{ color: COLORS.paper, fontSize: 15, fontWeight: 600, marginBottom: 10 }}>
             {selected.name}
-            {selected.isOnline && <span style={{ color: COLORS.amber, fontSize: 12, fontWeight: 400 }}> · USDA</span>}
+            {selected.isOnline && <span style={{ color: COLORS.amber, fontSize: 12, fontWeight: 400 }}> · {selected.sourceLabel || "USDA"}</span>}
           </div>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <Input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} style={{ maxWidth: 90 }} />

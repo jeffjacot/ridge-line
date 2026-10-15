@@ -2413,10 +2413,12 @@ const titleCase = (s) => String(s || "").toLowerCase().replace(/\b[a-z]/g, (c) =
 
 async function lookupBarcode(rawCode, usdaApiKey) {
   const code = String(rawCode || "").replace(/\D/g, "");
-  if (code.length < 6) return { food: null, error: "That doesn't look like a valid barcode number." };
+  if (code.length < 6) return { food: null, error: "That doesn't look like a valid barcode number.", trace: [] };
   const stripped = code.replace(/^0+/, "");
   let sawNetworkError = false;
+  const trace = [];
 
+  if (!usdaApiKey) trace.push("USDA: skipped (no API key in Settings)");
   if (usdaApiKey) {
     try {
       const params = new URLSearchParams();
@@ -2427,6 +2429,7 @@ async function lookupBarcode(rawCode, usdaApiKey) {
       if (res.ok) {
         const data = await res.json();
         const item = (data.foods || []).find((f) => String(f.gtinUpc || "").replace(/^0+/, "") === stripped);
+        if (!item) trace.push(`USDA: ${(data.foods || []).length} results, none matching ${code}`);
         if (item) {
           const nutrients = item.foodNutrients || [];
           const byId = (id) => {
@@ -2445,13 +2448,16 @@ async function lookupBarcode(rawCode, usdaApiKey) {
           };
           const unit = String(item.servingSizeUnit || "").toLowerCase();
           if (item.servingSize && (unit === "g" || unit === "grm")) food.servingGrams = Number(item.servingSize);
-          if (food.cal > 0 || food.protein + food.carbs + food.fat > 0) return { food };
+          if (food.cal > 0 || food.protein + food.carbs + food.fat > 0) return { food, trace };
+          trace.push("USDA: found the item but it has no nutrition data");
         }
       } else {
         sawNetworkError = true;
+        trace.push(`USDA: HTTP ${res.status}`);
       }
     } catch (e) {
       sawNetworkError = true;
+      trace.push(`USDA: ${(e && e.message) || "network error"}`);
     }
   }
 
@@ -2459,9 +2465,15 @@ async function lookupBarcode(rawCode, usdaApiKey) {
   for (const c of candidates) {
     try {
       const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${c}.json?fields=product_name,brands,nutriments,serving_quantity`);
-      if (!res.ok) continue;
+      if (!res.ok) {
+        trace.push(`Open Food Facts (${c}): HTTP ${res.status}`);
+        continue;
+      }
       const data = await res.json();
-      if (data.status !== 1 || !data.product) continue;
+      if (data.status !== 1 || !data.product) {
+        trace.push(`Open Food Facts (${c}): not in database`);
+        continue;
+      }
       const n = data.product.nutriments || {};
       const kcal = n["energy-kcal_100g"] != null ? Number(n["energy-kcal_100g"]) : n["energy_100g"] != null ? Number(n["energy_100g"]) / 4.184 : 0;
       const food = {
@@ -2475,12 +2487,14 @@ async function lookupBarcode(rawCode, usdaApiKey) {
       };
       const sq = Number(data.product.serving_quantity);
       if (sq > 0) food.servingGrams = sq;
-      if (food.cal > 0 || food.protein + food.carbs + food.fat > 0) return { food };
+      if (food.cal > 0 || food.protein + food.carbs + food.fat > 0) return { food, trace };
+      trace.push(`Open Food Facts (${c}): found "${food.name}" but it has no nutrition data`);
     } catch (e) {
       sawNetworkError = true;
+      trace.push(`Open Food Facts (${c}): ${(e && e.message) || "network error"}`);
     }
   }
-  return { food: null, error: sawNetworkError ? "Couldn't reach the food databases — check your connection and try again." : null };
+  return { food: null, error: sawNetworkError ? "Couldn't reach the food databases." : null, trace };
 }
 
 let zxingLoadPromise = null;
@@ -2516,43 +2530,81 @@ function BarcodeScanner({ onDetected, onClose }) {
 
   useEffect(() => {
     let reader = null;
+    let stream = null;
+    let timer = null;
     let cancelled = false;
     let fired = false;
+    const fire = (text) => {
+      if (fired || cancelled) return;
+      fired = true;
+      onDetected(text);
+    };
     (async () => {
       try {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          throw new Error("no-camera");
+          setStatus("This browser can't open the camera here. Type the barcode number below instead.");
+          return;
         }
+        const constraints = { video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false };
+
+        // Native detector (Chrome/Android, some newer browsers) — fastest and most accurate when present.
+        if (typeof window !== "undefined" && "BarcodeDetector" in window) {
+          try {
+            const detector = new window.BarcodeDetector({ formats: ["ean_13", "upc_a", "upc_e", "ean_8"] });
+            stream = await navigator.mediaDevices.getUserMedia(constraints);
+            if (cancelled) return;
+            const v = videoRef.current;
+            v.srcObject = stream;
+            await v.play();
+            setStatus("Camera on — hold the barcode steady inside the line");
+            timer = setInterval(async () => {
+              try {
+                const found = await detector.detect(v);
+                if (found && found.length > 0) fire(found[0].rawValue);
+              } catch (e) {}
+            }, 250);
+            return;
+          } catch (e) {
+            if (stream) stream.getTracks().forEach((t) => t.stop());
+            stream = null;
+            if (/NotAllowed|Permission/i.test(String(e && e.name))) throw e;
+            // otherwise fall through to the ZXing path
+          }
+        }
+
+        setStatus("Loading scanner…");
         const ZX = await loadZxing();
         if (cancelled) return;
         const hints = new Map();
         hints.set(ZX.DecodeHintType.POSSIBLE_FORMATS, [ZX.BarcodeFormat.EAN_13, ZX.BarcodeFormat.UPC_A, ZX.BarcodeFormat.UPC_E, ZX.BarcodeFormat.EAN_8]);
         hints.set(ZX.DecodeHintType.TRY_HARDER, true);
-        reader = new ZX.BrowserMultiFormatReader(hints, 250);
-        setStatus("Point the camera at the barcode");
-        await reader.decodeFromConstraints(
-          { video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } } },
-          videoRef.current,
-          (result) => {
-            if (result && !fired) {
-              fired = true;
-              onDetected(result.getText());
-            }
-          }
-        );
+        reader = new ZX.BrowserMultiFormatReader(hints, 200);
+        setStatus("Starting camera…");
+        const started = reader.decodeFromConstraints(constraints, videoRef.current, (result) => {
+          if (result) fire(result.getText());
+        });
+        // Don't wait on the promise (it can stay pending while scanning); just report once video is live.
+        const v = videoRef.current;
+        const onPlaying = () => !cancelled && !fired && setStatus("Camera on — hold the barcode steady inside the line");
+        v.addEventListener("playing", onPlaying, { once: true });
+        started.catch((e) => {
+          if (!cancelled) setStatus(`Couldn't start the camera (${(e && (e.name || e.message)) || "unknown error"}). Type the barcode number below instead.`);
+        });
       } catch (e) {
         if (cancelled) return;
-        const msg = String((e && (e.name || e.message)) || "");
-        if (/NotAllowed|Permission/i.test(msg)) setStatus("Camera access was blocked. Allow it in your phone's settings for this app, or type the number below.");
-        else if (/scanner library/i.test(String(e && e.message))) setStatus("Couldn't load the scanner. Check your connection, or type the number below.");
-        else setStatus("Couldn't start the camera. You can type the barcode number below instead.");
+        const name = String((e && (e.name || e.message)) || "unknown error");
+        if (/NotAllowed|Permission/i.test(name)) setStatus("Camera access is blocked. Allow the camera for this app in your phone's settings, or type the number below.");
+        else if (/scanner library/i.test(String(e && e.message))) setStatus("Couldn't download the scanner component. Check your connection, or type the number below.");
+        else setStatus(`Couldn't start the camera (${name}). Type the barcode number below instead.`);
       }
     })();
     return () => {
       cancelled = true;
+      if (timer) clearInterval(timer);
       try {
         if (reader) reader.reset();
       } catch (e) {}
+      if (stream) stream.getTracks().forEach((t) => t.stop());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -2629,7 +2681,7 @@ function FoodSearch({ onAdd, usdaApiKey, customFoods }) {
     setScanOpen(false);
     setScanBusy(true);
     setScanMsg(null);
-    const { food, error } = await lookupBarcode(code, usdaApiKey);
+    const { food, error, trace } = await lookupBarcode(code, usdaApiKey);
     setScanBusy(false);
     if (food) {
       setQuery("");
@@ -2645,7 +2697,8 @@ function FoodSearch({ onAdd, usdaApiKey, customFoods }) {
         setAmount("100");
       }
     } else {
-      setScanMsg(error || `Barcode ${String(code).replace(/\D/g, "")} isn't in the USDA or Open Food Facts databases. Search it by name instead, or add it as a custom food.`);
+      const head = error || `Barcode ${String(code).replace(/\D/g, "")} isn't in the USDA or Open Food Facts databases. Search it by name instead, or add it as a custom food.`;
+      setScanMsg(`${head}${trace && trace.length ? "\n\nDetails:\n" + trace.join("\n") : ""}`);
     }
   };
 
@@ -2758,7 +2811,7 @@ function FoodSearch({ onAdd, usdaApiKey, customFoods }) {
         </Button>
       </div>
       {scanBusy && <div style={{ color: COLORS.inkSoft, fontSize: 12.5, marginTop: 8 }}>Looking up barcode…</div>}
-      {scanMsg && <div style={{ color: COLORS.rust, fontSize: 12.5, marginTop: 8 }}>{scanMsg}</div>}
+      {scanMsg && <div style={{ color: COLORS.rust, fontSize: 12.5, marginTop: 8, whiteSpace: "pre-wrap" }}>{scanMsg}</div>}
       {results.length > 0 && (
         <div style={{ marginTop: 8, border: `1px solid ${COLORS.line}`, borderRadius: 6, overflow: "hidden" }}>
           {results.map((f) => (

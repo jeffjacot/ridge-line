@@ -2413,7 +2413,13 @@ const titleCase = (s) => String(s || "").toLowerCase().replace(/\b[a-z]/g, (c) =
 
 async function lookupBarcode(rawCode, usdaApiKey) {
   const code = String(rawCode || "").replace(/\D/g, "");
-  if (code.length < 6) return { food: null, error: "That doesn't look like a valid barcode number.", trace: [] };
+  if (![8, 12, 13, 14].includes(code.length)) {
+    return {
+      food: null,
+      error: `That number has ${code.length} digits — grocery barcodes have 12 (most US items), 13, or 8. A digit is probably missing or extra; check the number printed under the bars.`,
+      trace: [],
+    };
+  }
   const stripped = code.replace(/^0+/, "");
   let sawNetworkError = false;
   const trace = [];
@@ -2681,6 +2687,7 @@ function FoodSearch({ onAdd, usdaApiKey, customFoods }) {
     setScanOpen(false);
     setScanBusy(true);
     setScanMsg(null);
+    setSelected(null);
     const { food, error, trace } = await lookupBarcode(code, usdaApiKey);
     setScanBusy(false);
     if (food) {

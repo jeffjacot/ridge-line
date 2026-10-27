@@ -2722,7 +2722,7 @@ function FoodSearch({ onAdd, usdaApiKey, customFoods }) {
   const pick = (food) => {
     setSelected(food);
     setUnit("g");
-    setAmount("100");
+    setAmount("");
   };
 
   const handleScanned = async (code) => {
@@ -2738,13 +2738,8 @@ function FoodSearch({ onAdd, usdaApiKey, customFoods }) {
       setUsdaSearchedFor(null);
       setUsdaError(null);
       setSelected(food);
-      if (food.servingGrams) {
-        setUnit("serving");
-        setAmount("1");
-      } else {
-        setUnit("g");
-        setAmount("100");
-      }
+      setUnit("g");
+      setAmount("");
     } else {
       const head = error || `Barcode ${String(code).replace(/\D/g, "")} isn't in the USDA or Open Food Facts databases. Search it by name instead, or add it as a custom food.`;
       setScanMsg(`${head}${trace && trace.length ? "\n\nDetails:\n" + trace.join("\n") : ""}`);
@@ -2899,7 +2894,7 @@ function FoodSearch({ onAdd, usdaApiKey, customFoods }) {
             {selected.isOnline && <span style={{ color: COLORS.amber, fontSize: 12, fontWeight: 400 }}> · {selected.sourceLabel || "USDA"}</span>}
           </div>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <Input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} style={{ maxWidth: 90 }} />
+            <Input type="number" inputMode="decimal" placeholder="Amount" value={amount} onChange={(e) => setAmount(e.target.value)} style={{ maxWidth: 110 }} />
             <select
               value={unit}
               onChange={(e) => setUnit(e.target.value)}

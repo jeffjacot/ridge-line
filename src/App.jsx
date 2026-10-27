@@ -280,7 +280,7 @@ function buildTaperDays(weekStartSunday, taperIdx, peakLongRun) {
   return { days, longRun };
 }
 
-function buildRaceWeekDays(weekStartMonday, raceDate) {
+function buildRaceWeekDays(weekStartMonday, raceDate, raceMiles = 50, raceLabel = "50 Miles") {
   const days = [];
   const raceIdx = (raceDate.getDay() + 6) % 7; // convert JS Sun=0 to our Mon=0 index
   for (let i = 0; i < 7; i++) {
@@ -289,7 +289,7 @@ function buildRaceWeekDays(weekStartMonday, raceDate) {
     const offset = i - raceIdx;
     let type = "Rest",
       miles = 0;
-    if (offset === 0) { type = "RACE DAY — 50 Miles"; miles = 50; }
+    if (offset === 0) { type = `RACE DAY — ${raceLabel}`; miles = raceMiles; }
     else if (offset === -1) { type = "Rest — pre-race"; }
     else if (offset === -2) { type = "Shakeout jog"; miles = 2; }
     else if (offset === -3) { type = "Zone 2 easy (short)"; miles = 3; }
@@ -476,6 +476,109 @@ function applyRecoveryOverlay(weeks, recovery) {
   });
 }
 
+// ---------- half-marathon goal switch ----------
+// Used when the goal race changes from the 50-miler to a half marathon (e.g.
+// after an injury). Weeks before the switch keep their original 50-mile
+// prescriptions so history stays intact; from the switch week onward the plan
+// is rebuilt as: no-running weeks (Peloton + lifting) until the return date,
+// then a gentle return-to-run, a short build, a taper, and race week.
+// Peak long run is deliberately modest (9 mi) since the heel is the limiter.
+const HALF_LONG = [2, 3, 4, 5, 6, 8, 9, 6];
+const HALF_MON = [0, 2, 3, 3, 3, 4, 4, 3];
+const HALF_THU = [0, 0, 0, 0, 3, 3, 4, 0];
+const HALF_SAT = [2, 3, 3, 4, 4, 5, 5, 3];
+const BIKE_Z2 = "Bike — Zone 2, 45-60 min";
+const BIKE_SPIN = "Bike — easy spin, 30-45 min (recovery)";
+
+function halfDay(weekStart, i, type, miles, strength) {
+  const d = new Date(weekStart);
+  d.setDate(d.getDate() + i);
+  return { date: fmtDate(d), dayName: DAY_NAMES[i], short: DAY_NAMES[i].slice(0, 3), miles, type, strength: !!strength };
+}
+
+function buildHalfWeeks(firstWeekNum, switchMonday, returnDateStr, raceDateStr) {
+  const race = new Date(raceDateStr + "T00:00:00");
+  const raceMonday = mondayOf(race);
+  const totalWeeks = Math.round(daysBetween(switchMonday, raceMonday) / 7) + 1; // includes race week
+  if (totalWeeks < 1) return [];
+  const raceWeekIdx = totalWeeks - 1;
+  const returnDate = returnDateStr ? new Date(returnDateStr + "T00:00:00") : new Date(switchMonday);
+  const returnIdx = Math.min(raceWeekIdx, Math.max(0, Math.round(daysBetween(switchMonday, mondayOf(returnDate)) / 7)));
+  const runWeekCount = raceWeekIdx - returnIdx; // run weeks incl. the taper week
+  const mapIdx = (j) => (runWeekCount >= 8 ? Math.max(0, j - (runWeekCount - 8)) : runWeekCount <= 1 ? 7 : Math.round((j * 7) / (runWeekCount - 1)));
+
+  const weeks = [];
+  for (let i = 0; i < totalWeeks; i++) {
+    const ws = new Date(switchMonday);
+    ws.setDate(ws.getDate() + i * 7);
+    const weekNum = firstWeekNum + i;
+
+    if (i === raceWeekIdx) {
+      const days = buildRaceWeekDays(ws, race, 13.1, "Half Marathon");
+      // No three-days-in-a-row of running in race week — Tuesday becomes a spin.
+      if (days[1] && days[1].miles > 0 && days[1].type !== "Rest") days[1] = halfDay(ws, 1, "Bike — easy spin, 30 min", 0, false);
+      weeks.push({
+        week: weekNum, start: fmtDate(ws), phase: "Race Week", color: COLORS.paper,
+        longRun: 0, totalMiles: Math.round(days.reduce((s2, d) => s2 + (d.miles || 0), 0) * 10) / 10,
+        days, focus: "Easy shakeouts, carbs up, rest — then go enjoy race day", isCutback: false,
+      });
+      continue;
+    }
+
+    if (i < returnIdx) {
+      const days = [
+        halfDay(ws, 0, BIKE_Z2, 0, false),
+        halfDay(ws, 1, BIKE_Z2, 0, true),
+        halfDay(ws, 2, "Bike — long ride, 60-90 min Zone 2", 0, false),
+        halfDay(ws, 3, "Rest", 0, false),
+        halfDay(ws, 4, BIKE_SPIN, 0, true),
+        halfDay(ws, 5, BIKE_Z2, 0, false),
+        halfDay(ws, 6, "Rest", 0, false),
+      ];
+      weeks.push({
+        week: weekNum, start: fmtDate(ws), phase: "Rest & Cross-Train", color: COLORS.moss,
+        longRun: 0, totalMiles: 0, days,
+        focus: `No running until ${returnDateStr || "further notice"} — heel healing. Keep the Peloton rides (4-5 days) and lifting (3-4 days) going at an easy-to-moderate effort. If the heel still complains on the bike or when walking, ease off and consider getting it looked at.`,
+        isCutback: false, isRecovery: true, isRunBreak: true,
+      });
+      continue;
+    }
+
+    const idx = mapIdx(i - returnIdx);
+    const isTaper = idx === 7;
+    const phase = idx <= 2 ? "Return to Run" : isTaper ? "Taper" : "Half Build";
+    const color = idx <= 2 ? COLORS.moss : isTaper ? "#7A8FA0" : COLORS.amber;
+    const longLabel = idx <= 1 ? "Return-to-run — run/walk intervals" : idx === 6 ? "Long Run — peak" : idx === 7 ? "Long Run (reduced)" : "Long Run (aerobic)";
+    const easyLabel = idx <= 1 ? "Return-to-run — easy run/walk" : "Zone 2 easy";
+    const days = [
+      HALF_MON[idx] > 0 ? halfDay(ws, 0, easyLabel, HALF_MON[idx], false) : halfDay(ws, 0, BIKE_Z2, 0, false),
+      halfDay(ws, 1, BIKE_Z2, 0, true),
+      halfDay(ws, 2, longLabel, HALF_LONG[idx], false),
+      HALF_THU[idx] > 0 ? halfDay(ws, 3, easyLabel, HALF_THU[idx], false) : halfDay(ws, 3, "Bike — Zone 2, 45 min", 0, false),
+      halfDay(ws, 4, BIKE_SPIN, 0, true),
+      HALF_SAT[idx] > 0 ? halfDay(ws, 5, easyLabel, HALF_SAT[idx], false) : halfDay(ws, 5, BIKE_Z2, 0, false),
+      halfDay(ws, 6, "Rest", 0, false),
+    ];
+    // Nothing before the return date is a run, even in the return week.
+    days.forEach((d, k) => {
+      if (d.miles > 0 && returnDateStr && d.date < returnDateStr) days[k] = { ...d, miles: 0, type: "Bike — Zone 2, 45-60 min (no running yet)" };
+    });
+    const totalMiles = days.reduce((s2, d) => s2 + (d.miles || 0), 0);
+    const focus =
+      idx <= 2
+        ? "Return to running — short, flat, easy run/walk sessions with a day or more between them, and Peloton rides on the other days. If the heel flares, stop and swap in a ride instead of pushing through."
+        : isTaper
+        ? "Taper — cut volume, keep it easy, protect sleep and nutrition. Fitness is banked."
+        : "Half-marathon build — the long run grows gently toward 9 miles, with easy runs and Peloton rides keeping the load on the heel manageable.";
+    weeks.push({
+      week: weekNum, start: fmtDate(ws), phase, color,
+      longRun: HALF_LONG[idx], totalMiles, days, focus,
+      isCutback: false, isRecovery: idx <= 2,
+    });
+  }
+  return weeks;
+}
+
 // Works out the calorie target, activity estimate, deficit, and prescribed
 // session for ANY date — not just today — so both the Dashboard (today) and
 // the Nutrition tab (any day you're looking back at) can share one source
@@ -599,8 +702,10 @@ function buildCoachingSnapshot(mode, { raceDate, plan, currentWeek, runs, weight
   if (muscle) bodyCompLines.push(`Muscle mass: ${muscle.value} lb (${muscle.delta != null ? `${muscle.delta > 0 ? "+" : ""}${muscle.delta} lb vs 7 days ago` : "no 7-day comparison yet"})`);
 
   const todayDow = new Date(today + "T00:00:00").toLocaleDateString("en-US", { weekday: "long" });
-  let snapshot = `Today's date is ${today} (${todayDow}). Training for a 50-mile ultramarathon, race in ${daysToRace} days (${raceDate}). Currently in ${currentWeek.phase} phase, week ${currentWeek.week} of ${plan.weeks.length}${currentWeek.isCutback ? " (cutback week — volume intentionally reduced)" : ""}.\n\n`;
-  if (currentWeek.isRecovery) {
+  let snapshot = `Today's date is ${today} (${todayDow}). Training for ${profile.raceDistance === "half" ? "a half marathon (the goal was changed from a 50-miler because of a heel injury)" : "a 50-mile ultramarathon"}, race in ${daysToRace} days (${raceDate}). Currently in ${currentWeek.phase} phase, week ${currentWeek.week} of ${plan.weeks.length}${currentWeek.isCutback ? " (cutback week — volume intentionally reduced)" : ""}.\n\n`;
+  if (currentWeek.isRunBreak) {
+    snapshot += `This athlete has a heel injury and is on a planned break from running until ${profile.runReturnDate || "further notice"}. This week's schedule is cross-training only: Peloton rides 4-5 days a week plus weight lifting 3-4 days a week. Don't suggest running this week. Focus on how the heel is responding, the quality and consistency of the bike and lifting work, and getting ready for the gradual return to running.\n\n`;
+  } else if (currentWeek.isRecovery) {
     snapshot += `This athlete is dealing with left heel pain (manageable — sore during/after running but walking is fine; not currently seeking medical care unless it worsens) and the schedule shown below has already been automatically adjusted for it: volume is cut and high-impact sessions are swapped for cross-training. Don't re-suggest cutting volume or backing off — that's already built into the schedule you're seeing. Focus on how the heel is responding, cross-training execution, and whether the deload/ramp pace still looks right.\n\n`;
   }
   snapshot += `This week's full schedule (Mon–Sun), with actuals filled in for days already passed:\n${weekScheduleLines}\n\n`;
@@ -1018,7 +1123,7 @@ export default function UltraTrainingApp() {
   const [tab, setTab] = useState("dashboard");
   const [raceDate, setRaceDate] = useState("2027-01-30");
   const [planStartDate, setPlanStartDate] = useState("2026-07-27");
-  const [profile, setProfile] = useState({ baseTDEE: 2400, weightLb: "", weightLossMode: false, deficitKcal: 400, reducedFrequency: false, recoveryMode: false, recoveryStartDate: "", recoveryLength: 2, usdaApiKey: "", withingsClientId: "" });
+  const [profile, setProfile] = useState({ baseTDEE: 2400, weightLb: "", weightLossMode: false, deficitKcal: 400, reducedFrequency: false, recoveryMode: false, recoveryStartDate: "", recoveryLength: 2, raceDistance: "50", goalSwitchDate: "", runReturnDate: "", usdaApiKey: "", withingsClientId: "" });
   const [runs, setRuns] = useState([]);
   const [strengthLogs, setStrengthLogs] = useState([]);
   const [meals, setMeals] = useState({}); // { 'YYYY-MM-DD': [ {id,name,cal,protein,carbs,fat} ] }
@@ -1042,7 +1147,7 @@ export default function UltraTrainingApp() {
     (async () => {
       const rd = await loadJSON("race-date", "2027-01-30");
       const psd = await loadJSON("plan-start-date", "2026-07-27");
-      const pr = await loadJSON("profile", { baseTDEE: 2400, weightLb: "", weightLossMode: false, deficitKcal: 400, reducedFrequency: false, recoveryMode: false, recoveryStartDate: "", recoveryLength: 2, usdaApiKey: "", withingsClientId: "" });
+      const pr = await loadJSON("profile", { baseTDEE: 2400, weightLb: "", weightLossMode: false, deficitKcal: 400, reducedFrequency: false, recoveryMode: false, recoveryStartDate: "", recoveryLength: 2, raceDistance: "50", goalSwitchDate: "", runReturnDate: "", usdaApiKey: "", withingsClientId: "" });
       const rn = await loadJSON("runs", []);
       const sl = await loadJSON("strength-logs", []);
       const ml = await loadJSON("meals", {});
@@ -1337,14 +1442,20 @@ export default function UltraTrainingApp() {
 
   const plan = useMemo(() => {
     const base = buildPlan(raceDate, planStartDate, profile.reducedFrequency);
-    const weeks = applyRecoveryOverlay(base.weeks, {
+    let weeks = applyRecoveryOverlay(base.weeks, {
       active: profile.recoveryMode,
       startDate: profile.recoveryStartDate,
       length: profile.recoveryLength,
     });
+    if (profile.raceDistance === "half" && profile.goalSwitchDate) {
+      const switchMonday = mondayOf(new Date(profile.goalSwitchDate + "T00:00:00"));
+      const keep = weeks.filter((w) => new Date(w.start + "T00:00:00") < switchMonday);
+      const halfWeeks = buildHalfWeeks(keep.length + 1, switchMonday, profile.runReturnDate, raceDate);
+      if (halfWeeks.length > 0) weeks = [...keep, ...halfWeeks];
+    }
     return { ...base, weeks };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [raceDate, planStartDate, profile.reducedFrequency, profile.recoveryMode, profile.recoveryStartDate, profile.recoveryLength]);
+  }, [raceDate, planStartDate, profile.reducedFrequency, profile.recoveryMode, profile.recoveryStartDate, profile.recoveryLength, profile.raceDistance, profile.goalSwitchDate, profile.runReturnDate]);
   const daysToRace = daysBetween(new Date(todayStr() + "T00:00:00"), new Date(raceDate + "T00:00:00"));
   const weeksToRace = Math.max(0, Math.ceil(daysToRace / 7));
 
@@ -1502,7 +1613,7 @@ export default function UltraTrainingApp() {
       <div style={{ padding: "26px 28px 0", maxWidth: 980, margin: "0 auto" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12 }}>
           <div>
-            <Eyebrow>50-Mile Build</Eyebrow>
+            <Eyebrow>{profile.raceDistance === "half" ? "Half Marathon Build" : "50-Mile Build"}</Eyebrow>
             <h1 style={{ fontFamily: "Oswald, sans-serif", fontWeight: 700, fontSize: 30, margin: 0, color: COLORS.paper, letterSpacing: "0.01em" }}>
               Ridge Line
             </h1>
@@ -1647,6 +1758,7 @@ export default function UltraTrainingApp() {
 }
 
 function strengthKeyForPhase(phase) {
+  if (phase === "Half Build") return "Build I";
   if (phase === "Build II" || phase === "Peak") return "Build II / Peak";
   if (phase === "Taper" || phase === "Race Week") return "Taper";
   if (phase === "Build I") return "Build I";
@@ -1839,7 +1951,7 @@ function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalor
               >
                 <div style={{ fontSize: 9.5, color: COLORS.inkSoft, textTransform: "uppercase", letterSpacing: "0.03em" }}>{d.short}</div>
                 <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 14, fontWeight: 600, color: isRest ? COLORS.inkSoft : COLORS.paper, marginTop: 2 }}>
-                  {isRest ? "—" : `${d.miles}`}
+                  {isRest ? "—" : d.miles === 0 && /^(Bike|Cross-train)/i.test(d.type) ? "Bike" : `${d.miles}`}
                 </div>
                 {d.strength && <div style={{ fontSize: 9, color: COLORS.amber, marginTop: 1 }}>+S</div>}
               </div>
@@ -1853,7 +1965,7 @@ function Dashboard({ plan, currentWeek, thisWeekMiles, thisWeekVert, todaysCalor
 
       {!todaysRun && todaysPrescription && todaysPrescription.type !== "Rest" && (
         <Card style={{ borderColor: COLORS.amber + "66" }}>
-          <div style={{ color: COLORS.inkSoft, fontSize: 14 }}>No run logged today yet — head to the Training Log tab once you're done.</div>
+          <div style={{ color: COLORS.inkSoft, fontSize: 14 }}>{todaysPrescription.miles > 0 ? "No run logged today yet — head to the Training Log tab once you're done." : "No session logged today yet — your Peloton rides sync from Strava, or you can log one in the Training Log tab."}</div>
         </Card>
       )}
     </div>
@@ -2389,7 +2501,7 @@ function PlanView({ plan }) {
                         whiteSpace: "nowrap",
                       }}
                     >
-                      {isRest ? "—" : `${d.miles}${d.strength ? "+S" : ""}`}
+                      {isRest ? "—" : d.miles === 0 && /^(Bike|Cross-train)/i.test(d.type) ? `Bike${d.strength ? "+S" : ""}` : `${d.miles}${d.strength ? "+S" : ""}`}
                     </td>
                   );
                 })}
@@ -3550,6 +3662,36 @@ function Settings({
         </div>
         <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 10 }}>
           Week 1 always snaps to the Monday on or before whatever date you enter here.
+        </div>
+      </Card>
+      <Card>
+        <Eyebrow>Goal race &amp; running break</Eyebrow>
+        <label style={{ fontSize: 12, color: COLORS.inkSoft }}>Goal race on the date above</label>
+        <select
+          value={profile.raceDistance || "50"}
+          onChange={(e) => {
+            const v = e.target.value;
+            setProfile({ ...profile, raceDistance: v, goalSwitchDate: v === "half" && !profile.goalSwitchDate ? todayStr() : profile.goalSwitchDate });
+          }}
+          style={{ display: "block", marginTop: 4, width: "100%", maxWidth: 400, background: COLORS.raised, color: COLORS.ink, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "8px 10px", fontSize: 13 }}
+        >
+          <option value="50">50-miler (original plan)</option>
+          <option value="half">Half marathon</option>
+        </select>
+        {profile.raceDistance === "half" && (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, maxWidth: 400, marginTop: 12 }}>
+            <div>
+              <label style={{ fontSize: 12, color: COLORS.inkSoft }}>New plan starts (week of)</label>
+              <Input type="date" value={profile.goalSwitchDate || todayStr()} onChange={(e) => setProfile({ ...profile, goalSwitchDate: e.target.value })} style={{ marginTop: 4 }} />
+            </div>
+            <div>
+              <label style={{ fontSize: 12, color: COLORS.inkSoft }}>No running until</label>
+              <Input type="date" value={profile.runReturnDate || ""} onChange={(e) => setProfile({ ...profile, runReturnDate: e.target.value })} style={{ marginTop: 4 }} />
+            </div>
+          </div>
+        )}
+        <div style={{ color: COLORS.inkSoft, fontSize: 12, marginTop: 10, lineHeight: 1.6 }}>
+          Switching to a half marathon keeps every week before the start date exactly as it was. From that week on, the plan becomes cross-training only (Peloton rides plus lifting) until your "no running until" date, then a gentle return to running, a short build to a 9-mile long run, a taper, and race week. The date below the heading is still your race date.
         </div>
       </Card>
       <Card>
